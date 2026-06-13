@@ -25,14 +25,18 @@ interface UseMediasoupOptions {
 }
 
 export function useMediasoup({ sessionId, userId, userName, userRole, onSessionEnded }: UseMediasoupOptions) {
-  const socketRef        = useRef<Socket | null>(null);
-  const deviceRef        = useRef<Device | null>(null);
-  const sendTransportRef = useRef<Transport | null>(null);
-  const recvTransportRef = useRef<Transport | null>(null);
-  const audioProducerRef = useRef<Producer | null>(null);
-  const videoProducerRef = useRef<Producer | null>(null);
-  const consumersRef     = useRef<Map<string, Consumer>>(new Map());
-  const localStreamRef   = useRef<MediaStream | null>(null);
+  const socketRef           = useRef<Socket | null>(null);
+  const deviceRef           = useRef<Device | null>(null);
+  const sendTransportRef    = useRef<Transport | null>(null);
+  const recvTransportRef    = useRef<Transport | null>(null);
+  const audioProducerRef    = useRef<Producer | null>(null);
+  const videoProducerRef    = useRef<Producer | null>(null);
+  const consumersRef        = useRef<Map<string, Consumer>>(new Map());
+  const localStreamRef      = useRef<MediaStream | null>(null);
+  // Track which socket the send transport was created for.
+  // If the socket reconnects (new socket.id), the server no longer knows
+  // the old transport, so we must create a fresh one.
+  const sendTransportSocketId = useRef<string | null>(null);
 
   const onSessionEndedRef = useRef(onSessionEnded);
   const sessionIdRef = useRef(sessionId);
@@ -59,6 +63,7 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
   const [peers,                setPeers]                = useState<PeerInfo[]>([]);
   const [incomingVideoRequest, setIncomingVideoRequest] = useState(false);
   const [videoRequestPending,  setVideoRequestPending]  = useState(false);
+  const [facingMode,           setFacingMode]           = useState<'user' | 'environment'>('user');
 
   // --------------------------------------------------------------------------
   // Helpers
@@ -75,21 +80,28 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
     });
   }, []);
 
-  // Reset transport refs so they are re-created after a reconnect.
-  // The server associates transports with socket IDs; after reconnect the
-  // old transport IDs are unknown to the server for the new socket ID.
+  // Close and null all mediasoup resources.
+  // Must be called whenever the socket reconnects so we start fresh.
   const resetTransports = useCallback(() => {
-    sendTransportRef.current?.close();
-    recvTransportRef.current?.close();
-    sendTransportRef.current = null;
-    recvTransportRef.current = null;
-    consumersRef.current.forEach((c) => c.close());
+    try { sendTransportRef.current?.close(); } catch {}
+    try { recvTransportRef.current?.close(); } catch {}
+    sendTransportRef.current    = null;
+    recvTransportRef.current    = null;
+    sendTransportSocketId.current = null;
+    consumersRef.current.forEach((c) => { try { c.close(); } catch {} });
     consumersRef.current.clear();
   }, []);
 
+  // Create a fresh send transport. Always associates it with the current socket ID.
   const createSendTransport = useCallback(async (): Promise<Transport> => {
     const device = deviceRef.current;
     if (!device) throw new Error('Device not loaded');
+    if (!socketRef.current?.connected) throw new Error('Socket not connected');
+
+    // Close any previous send transport first
+    try { sendTransportRef.current?.close(); } catch {}
+    sendTransportRef.current = null;
+
     const sid = sessionIdRef.current;
     const d = await emitAsync('create-transport', { sessionId: sid, direction: 'send' });
     const t = device.createSendTransport({
@@ -101,10 +113,14 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
       catch (e) { eb(e as Error); }
     });
     t.on('produce', async ({ kind, rtpParameters, appData }, cb, eb) => {
-      try { const { id } = await emitAsync('produce', { sessionId: sid, transportId: t.id, kind, rtpParameters, appData }); cb({ id }); }
-      catch (e) { eb(e as Error); }
+      try {
+        const { id } = await emitAsync('produce', { sessionId: sid, transportId: t.id, kind, rtpParameters, appData });
+        cb({ id });
+      } catch (e) { eb(e as Error); }
     });
-    sendTransportRef.current = t;
+    sendTransportRef.current    = t;
+    sendTransportSocketId.current = socketRef.current!.id ?? null;
+    console.log('[ConnectDesk] Send transport created:', t.id, '| socket:', sendTransportSocketId.current);
     return t;
   }, [emitAsync]);
 
@@ -125,10 +141,22 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
     return t;
   }, [emitAsync]);
 
+  // Returns a valid send transport for the CURRENT socket connection.
+  // Creates a new one if none exists or if the socket has reconnected since creation.
+  const getOrCreateSendTransport = useCallback(async (): Promise<Transport> => {
+    const currentSocketId = socketRef.current?.id;
+    const existing = sendTransportRef.current;
+    // Reuse only if not closed AND created for this socket session
+    if (existing && !existing.closed && sendTransportSocketId.current === currentSocketId) {
+      return existing;
+    }
+    // Otherwise create a fresh one
+    return await createSendTransport();
+  }, [createSendTransport]);
+
   const consumeProducer = useCallback(async (producerId: string, peerSocketId: string, peerName?: string, peerRole?: string) => {
     const device = deviceRef.current;
     if (!device) return;
-    // Always get/create a valid recv transport
     let transport = recvTransportRef.current;
     if (!transport || transport.closed) transport = await createRecvTransport();
     try {
@@ -145,7 +173,7 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
         const m = new Map(prev);
         const ex = m.get(peerSocketId);
         if (ex) {
-          if (!ex.stream.getTracks().map((t) => t.id).includes(consumer.track.id)) ex.stream.addTrack(consumer.track);
+          if (!ex.stream.getTracks().map((tk) => tk.id).includes(consumer.track.id)) ex.stream.addTrack(consumer.track);
           m.set(peerSocketId, { ...ex, peerName: peerName || ex.peerName, peerRole: peerRole || ex.peerRole });
         } else {
           m.set(peerSocketId, {
@@ -168,7 +196,6 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
       setPeers((p) => [...p.filter((x) => x.socketId !== peer.socketId), peer]);
     });
     socket.on('peer-left', ({ socketId }: { socketId: string }) => {
-      console.log('[ConnectDesk] Peer left:', socketId);
       setPeers((p) => p.filter((x) => x.socketId !== socketId));
       setRemoteStreams((p) => { const m = new Map(p); m.delete(socketId); return m; });
     });
@@ -182,12 +209,12 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
     });
     socket.on('producer-closed', ({ producerId }: { producerId: string }) => {
       consumersRef.current.forEach((c, cid) => {
-        if (c.producerId === producerId) { c.close(); consumersRef.current.delete(cid); }
+        if (c.producerId === producerId) { try { c.close(); } catch {} consumersRef.current.delete(cid); }
       });
     });
     socket.on('consumer-closed', ({ consumerId }: { consumerId: string }) => {
       const c = consumersRef.current.get(consumerId);
-      if (c) { c.close(); consumersRef.current.delete(consumerId); }
+      if (c) { try { c.close(); } catch {} consumersRef.current.delete(consumerId); }
     });
     socket.on('media-state-change', ({ socketId, kind, enabled }: { socketId: string; kind: string; enabled: boolean }) => {
       setRemoteStreams((prev) => {
@@ -205,11 +232,10 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
     socket.on('video-request-accepted', () => setVideoRequestPending(false));
     socket.on('video-request-declined', () => { setVideoRequestPending(false); setMediaWarning('Customer declined the video request.'); });
     socket.on('disconnect', (reason) => {
-      console.log('[ConnectDesk] Disconnected:', reason);
+      console.log('[ConnectDesk] Socket disconnected:', reason);
       setIsConnected(false);
-      // CRITICAL: Reset transport refs. Old transport IDs are bound to the
-      // old socket ID on the server. After reconnect the server creates a new
-      // peer entry, so we must create fresh transports.
+      // Reset all transport refs. The server removes this peer on disconnect,
+      // so all transport IDs are invalid after reconnect.
       resetTransports();
     });
   }, [consumeProducer, resetTransports]);
@@ -222,19 +248,18 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
     if (socketRef.current?.connected) return;
     setIsConnecting(true);
     setError(null);
-    // Always reset stale refs before connecting
     resetTransports();
     deviceRef.current = null;
 
     try {
       const socketHost = window.location.hostname;
       const url = process.env.NEXT_PUBLIC_SOCKET_URL || `${window.location.protocol}//${socketHost}:3001`;
-      console.log('[ConnectDesk] Connecting:', url, '| Session:', sessionIdRef.current, '| Role:', userRoleRef.current);
+      console.log('[ConnectDesk] Connecting:', url, '| Session:', sessionIdRef.current);
 
       const socket = io(url, {
         path: '/socket.io',
         transports: ['polling', 'websocket'],
-        reconnection: false, // We handle reconnect manually via connect()
+        reconnection: false,
         timeout: 10000,
         forceNew: true,
       });
@@ -243,50 +268,43 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
       await new Promise<void>((resolve, reject) => {
         const t = setTimeout(() => {
           socket.disconnect();
-          reject(new Error('Connection timed out. Make sure both servers are running:\n  npm run dev:all'));
+          reject(new Error('Connection timed out. Make sure both servers are running: npm run dev:all'));
         }, 10000);
         socket.on('connect', () => { clearTimeout(t); resolve(); });
         socket.on('connect_error', (err) => {
           clearTimeout(t); socket.disconnect();
-          reject(new Error(`Cannot reach SFU at ${url}\nDetail: ${err.message}`));
+          reject(new Error(`Cannot reach SFU at ${url} -- Detail: ${err.message}`));
         });
       });
 
       console.log('[ConnectDesk] Socket connected:', socket.id);
 
-      // Join the room
       const joinData = await emitAsync('join-room', {
         sessionId: sessionIdRef.current, userId: userIdRef.current,
         name: userNameRef.current, role: userRoleRef.current,
       });
-      console.log('[ConnectDesk] Joined room | existing peers:', joinData.existingPeers?.length ?? 0);
+      console.log('[ConnectDesk] Joined | existing peers:', joinData.existingPeers?.length ?? 0);
 
-      // Load mediasoup device
       const device = new mediasoupClient.Device();
       await device.load({ routerRtpCapabilities: joinData.routerRtpCapabilities });
       deviceRef.current = device;
 
-      // Create recv transport
       await createRecvTransport();
 
-      // Consume existing producers
       const existingPeers: PeerInfo[] = joinData.existingPeers || [];
       setPeers(existingPeers);
       for (const peer of existingPeers) {
         if (peer.producers && peer.producers.length > 0) {
-          for (const prod of peer.producers) {
-            await consumeProducer(prod.id, peer.socketId, peer.name, peer.role);
-          }
+          for (const prod of peer.producers) await consumeProducer(prod.id, peer.socketId, peer.name, peer.role);
         }
       }
 
       registerSocketEvents(socket);
       setIsConnected(true);
       setSupportMode('chat');
-      console.log('[ConnectDesk] Ready | mode: chat');
     } catch (err: any) {
       console.error('[ConnectDesk] Connect failed:', err.message);
-      setError(err.message || 'Failed to connect to session');
+      setError(err.message || 'Failed to connect');
       socketRef.current?.disconnect();
       socketRef.current = null;
     } finally {
@@ -300,7 +318,7 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
 
   const startVoice = useCallback(async () => {
     if (!deviceRef.current || !socketRef.current?.connected) {
-      setMediaWarning('Not connected. Please wait or refresh.');
+      setMediaWarning('Not connected. Please wait or refresh the page.');
       return;
     }
     setMediaWarning(null);
@@ -316,36 +334,31 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
       );
       return;
     }
-
-    if (localStreamRef.current) stream.getAudioTracks().forEach((t) => localStreamRef.current!.addTrack(t));
+    if (localStreamRef.current) stream.getAudioTracks().forEach((tk) => localStreamRef.current!.addTrack(tk));
     else { localStreamRef.current = stream; setLocalStream(stream); }
-
     try {
-      // Always create a fresh send transport if needed
-      let st = sendTransportRef.current;
-      if (!st || st.closed) st = await createSendTransport();
-
+      const st = await getOrCreateSendTransport();
       const audioTrack = stream.getAudioTracks()[0];
       if (audioTrack && !audioProducerRef.current) {
         audioProducerRef.current = await st.produce({ track: audioTrack, appData: { mediaType: 'audio' } });
-        console.log('[ConnectDesk] Audio producer:', audioProducerRef.current.id);
+        console.log('[ConnectDesk] Audio producer created:', audioProducerRef.current.id);
       }
       setIsAudioEnabled(true);
       setSupportMode('voice');
       socketRef.current?.emit('media-state-change', { sessionId: sessionIdRef.current, kind: 'audio', enabled: true });
     } catch (e: any) {
       console.error('[ConnectDesk] startVoice error:', e);
-      setMediaWarning('Failed to start voice. Check console for details.');
+      setMediaWarning('Failed to start voice: ' + e.message);
     }
-  }, [createSendTransport]);
+  }, [getOrCreateSendTransport]);
 
   // --------------------------------------------------------------------------
   // startVideo()
   // --------------------------------------------------------------------------
 
-  const startVideo = useCallback(async () => {
+  const startVideo = useCallback(async (facing: 'user' | 'environment' = 'user') => {
     if (!deviceRef.current || !socketRef.current?.connected) {
-      setMediaWarning('Not connected. Please wait or refresh.');
+      setMediaWarning('Not connected. Please wait or refresh the page.');
       return;
     }
     setMediaWarning(null);
@@ -353,7 +366,7 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
     try {
       stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true },
-        video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
+        video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 }, facingMode: facing },
       });
     } catch (err: any) {
       setMediaWarning(
@@ -365,17 +378,15 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
       return;
     }
 
-    // Stop previous tracks
-    if (localStreamRef.current) localStreamRef.current.getTracks().forEach((t) => t.stop());
+    // Stop old tracks
+    if (localStreamRef.current) localStreamRef.current.getTracks().forEach((tk) => tk.stop());
     localStreamRef.current = stream;
-    setLocalStream(stream);
+    setLocalStream(new MediaStream(stream.getTracks())); // new object to force useEffect re-run
 
     try {
-      // Always create a fresh send transport if needed
-      let st = sendTransportRef.current;
-      if (!st || st.closed) st = await createSendTransport();
+      const st = await getOrCreateSendTransport();
 
-      // Close old producers
+      // Close old producers before creating new ones
       if (audioProducerRef.current) { try { audioProducerRef.current.close(); } catch {} audioProducerRef.current = null; }
       if (videoProducerRef.current) { try { videoProducerRef.current.close(); } catch {} videoProducerRef.current = null; }
 
@@ -393,14 +404,46 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
         });
         console.log('[ConnectDesk] Video producer:', videoProducerRef.current.id);
       }
+      setFacingMode(facing);
       setIsAudioEnabled(true); setIsVideoEnabled(true); setSupportMode('video');
       socketRef.current?.emit('media-state-change', { sessionId: sessionIdRef.current, kind: 'audio', enabled: true });
       socketRef.current?.emit('media-state-change', { sessionId: sessionIdRef.current, kind: 'video', enabled: true });
     } catch (e: any) {
       console.error('[ConnectDesk] startVideo error:', e);
-      setMediaWarning('Failed to start video. Check console for details.');
+      setMediaWarning('Failed to start video: ' + e.message);
     }
-  }, [createSendTransport]);
+  }, [getOrCreateSendTransport]);
+
+  // --------------------------------------------------------------------------
+  // switchCamera() - swap front/back camera without re-negotiating
+  // --------------------------------------------------------------------------
+
+  const switchCamera = useCallback(async () => {
+    if (supportMode !== 'video' || !videoProducerRef.current) return;
+    const newFacing: 'user' | 'environment' = facingMode === 'user' ? 'environment' : 'user';
+    try {
+      const newStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: newFacing, width: { ideal: 1280 }, height: { ideal: 720 } },
+      });
+      const newVideoTrack = newStream.getVideoTracks()[0];
+      if (!newVideoTrack) return;
+
+      // Replace track on existing producer (no new negotiation needed)
+      await videoProducerRef.current.replaceTrack({ track: newVideoTrack });
+
+      // Update local stream
+      if (localStreamRef.current) {
+        localStreamRef.current.getVideoTracks().forEach((tk) => { tk.stop(); localStreamRef.current!.removeTrack(tk); });
+        localStreamRef.current.addTrack(newVideoTrack);
+        setLocalStream(new MediaStream(localStreamRef.current.getTracks()));
+      }
+      setFacingMode(newFacing);
+      console.log('[ConnectDesk] Camera switched to:', newFacing);
+    } catch (e: any) {
+      console.error('[ConnectDesk] switchCamera error:', e);
+      setMediaWarning('Could not switch camera: ' + e.message);
+    }
+  }, [facingMode, supportMode]);
 
   // --------------------------------------------------------------------------
   // Controls
@@ -409,7 +452,7 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
   const stopMedia = useCallback(() => {
     try { audioProducerRef.current?.close(); } catch {} audioProducerRef.current = null;
     try { videoProducerRef.current?.close(); } catch {} videoProducerRef.current = null;
-    if (localStreamRef.current) { localStreamRef.current.getTracks().forEach((t) => t.stop()); localStreamRef.current = null; }
+    if (localStreamRef.current) { localStreamRef.current.getTracks().forEach((tk) => tk.stop()); localStreamRef.current = null; }
     setLocalStream(null); setIsAudioEnabled(false); setIsVideoEnabled(false); setSupportMode('chat');
     socketRef.current?.emit('media-state-change', { sessionId: sessionIdRef.current, kind: 'audio', enabled: false });
     socketRef.current?.emit('media-state-change', { sessionId: sessionIdRef.current, kind: 'video', enabled: false });
@@ -436,7 +479,7 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
   const respondToVideoRequest = useCallback(async (accepted: boolean) => {
     setIncomingVideoRequest(false);
     socketRef.current?.emit('video-request-response', { sessionId: sessionIdRef.current, accepted });
-    if (accepted) await startVideo();
+    if (accepted) await startVideo('user');
   }, [startVideo]);
 
   const sendMessage = useCallback(async (content: string, type: 'TEXT' | 'FILE' = 'TEXT', fileUrl?: string, fileName?: string, fileSize?: number) => {
@@ -469,9 +512,11 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
 
   useEffect(() => {
     return () => {
-      if (localStreamRef.current) { localStreamRef.current.getTracks().forEach((t) => t.stop()); }
-      sendTransportRef.current?.close(); recvTransportRef.current?.close();
-      consumersRef.current.forEach((c) => c.close()); socketRef.current?.disconnect();
+      if (localStreamRef.current) localStreamRef.current.getTracks().forEach((tk) => tk.stop());
+      try { sendTransportRef.current?.close(); } catch {}
+      try { recvTransportRef.current?.close(); } catch {}
+      consumersRef.current.forEach((c) => { try { c.close(); } catch {} });
+      socketRef.current?.disconnect();
     };
   }, []);
 
@@ -480,6 +525,7 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
     localStream, remoteStreams,
     supportMode, startVoice, startVideo, stopMedia, mediaWarning, clearMediaWarning,
     isAudioEnabled, isVideoEnabled, toggleAudio, toggleVideo,
+    facingMode, switchCamera,
     requestCustomerVideo, respondToVideoRequest, incomingVideoRequest, videoRequestPending,
     chatMessages, setChatMessages, sendMessage, endSession, peers,
   };

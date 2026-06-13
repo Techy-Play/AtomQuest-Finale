@@ -20,7 +20,6 @@ export default function SessionPage() {
   const sessionId = params.id as string;
   const { user, loading } = useAuth();
 
-  // UI state
   const [sessionInfo,   setSessionInfo]   = useState<any>(null);
   const [chatOpen,      setChatOpen]      = useState(true);
   const [messageInput,  setMessageInput]  = useState('');
@@ -29,16 +28,14 @@ export default function SessionPage() {
   const [uploadingFile, setUploadingFile] = useState(false);
   const [uploadError,   setUploadError]   = useState<string | null>(null);
   const [networkHost,   setNetworkHost]   = useState('');
-  const [socketStatus,  setSocketStatus]  = useState<'connecting' | 'connected' | 'disconnected' | 'failed'>('connecting');
+  const [socketStatus,  setSocketStatus]  = useState<'connecting'|'connected'|'disconnected'|'failed'>('connecting');
 
-  // Refs
   const fileInputRef    = useRef<HTMLInputElement>(null);
   const localVideoRef   = useRef<HTMLVideoElement>(null);
   const remoteVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
   const chatEndRef      = useRef<HTMLDivElement>(null);
   const timerRef        = useRef<NodeJS.Timeout | null>(null);
 
-  // Recording (agent only)
   const [recordingStatus, setRecordingStatus] = useState<RecordingStatus>('idle');
   const [recordingUrl,    setRecordingUrl]    = useState<string | null>(null);
   const mediaRecorderRef    = useRef<MediaRecorder | null>(null);
@@ -51,6 +48,7 @@ export default function SessionPage() {
     localStream, remoteStreams,
     supportMode, startVoice, startVideo, stopMedia, mediaWarning, clearMediaWarning,
     isAudioEnabled, isVideoEnabled, toggleAudio, toggleVideo,
+    facingMode, switchCamera,
     requestCustomerVideo, respondToVideoRequest, incomingVideoRequest, videoRequestPending,
     chatMessages, setChatMessages, sendMessage,
     endSession, peers,
@@ -64,31 +62,30 @@ export default function SessionPage() {
 
   const isAgent = user?.role === 'AGENT' || user?.role === 'ADMIN';
 
-  // Capture hostname for display
   useEffect(() => {
     if (typeof window !== 'undefined') setNetworkHost(window.location.hostname);
   }, []);
 
-  // Auto-connect when user loads
+  // Auto-connect on mount
   useEffect(() => {
     if (!loading && user) connect();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, user]);
 
-  // Sync socketStatus
+  // Sync socket status indicator
   useEffect(() => {
-    if (isConnecting)  setSocketStatus('connecting');
+    if (isConnecting)     setSocketStatus('connecting');
     else if (isConnected) setSocketStatus('connected');
-    else if (error)    setSocketStatus('failed');
-    else               setSocketStatus('disconnected');
+    else if (error)       setSocketStatus('failed');
+    else                  setSocketStatus('disconnected');
   }, [isConnecting, isConnected, error]);
 
-  // Fetch session info + message history
+  // Fetch session info + history
   useEffect(() => {
     if (loading || !user) return;
-    const fetchSession = async () => {
+    (async () => {
       try {
-        const res  = await fetch(`/api/sessions/${sessionId}`);
+        const res  = await fetch('/api/sessions/' + sessionId);
         const data = await res.json();
         if (data.session) {
           setSessionInfo(data.session);
@@ -100,38 +97,30 @@ export default function SessionPage() {
             })));
           }
         }
-      } catch (err) { console.error('Failed to fetch session:', err); }
-    };
-    fetchSession();
-  }, [loading, user, sessionId, setChatMessages]);
+      } catch (e) { console.error('Failed to fetch session:', e); }
+    })();
+  }, [loading, user, sessionId]);
 
-  // Attach local stream to video element
   const attachStream = useCallback((el: HTMLVideoElement, stream: MediaStream) => {
-    if (el.srcObject !== stream) { el.srcObject = stream; }
+    if (el.srcObject !== stream) el.srcObject = stream;
     if (el.paused) el.play().catch(() => {});
   }, []);
 
+  // Attach local stream - retry with timeouts since React may not have mounted video yet
   useEffect(() => {
     if (!localStream) return;
-    const el = localVideoRef.current;
-    if (el) attachStream(el, localStream);
-    else {
-      const t = setTimeout(() => { if (localVideoRef.current) attachStream(localVideoRef.current, localStream); }, 200);
-      return () => clearTimeout(t);
-    }
+    const tryAttach = () => { if (localVideoRef.current) attachStream(localVideoRef.current, localStream); };
+    tryAttach();
+    const t1 = setTimeout(tryAttach, 150);
+    const t2 = setTimeout(tryAttach, 500);
+    return () => { clearTimeout(t1); clearTimeout(t2); };
   }, [localStream, attachStream]);
 
+  // Attach remote streams
   useEffect(() => {
     remoteStreams.forEach((remote, peerId) => {
       const el = remoteVideoRefs.current.get(peerId);
       if (el) attachStream(el, remote.stream);
-      else {
-        const t = setTimeout(() => {
-          const el2 = remoteVideoRefs.current.get(peerId);
-          if (el2) attachStream(el2, remote.stream);
-        }, 200);
-        return () => clearTimeout(t);
-      }
     });
   }, [remoteStreams, attachStream]);
 
@@ -143,16 +132,15 @@ export default function SessionPage() {
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
   }, [isConnected, callEnded]);
 
-  // Scroll chat to bottom
+  // Auto-scroll chat
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [chatMessages]);
 
-  // Recording — auto-start when remote video appears (agent only)
+  // Auto-start recording when remote video appears (agent only)
   const hasRemoteParticipant = remoteStreams.size > 0;
   useEffect(() => {
     if (!isAgent || !isConnected || !hasRemoteParticipant || recordingStartedRef.current) return;
     const [, remoteEntry] = Array.from(remoteStreams.entries())[0] || [];
-    const videoTracks = remoteEntry?.stream?.getVideoTracks() ?? [];
-    if (videoTracks.length === 0) return; // only record when video is present
+    if (!remoteEntry?.stream?.getVideoTracks().length) return;
     try {
       recordingStartedRef.current = true;
       setRecordingStatus('recording');
@@ -166,15 +154,14 @@ export default function SessionPage() {
         setRecordingStatus('processing');
         try {
           const chunks = recordingChunksRef.current;
-          if (chunks.length === 0 || chunks.reduce((s, c) => s + c.size, 0) < 1024) {
-            setRecordingStatus('idle'); return;
-          }
+          if (!chunks.length || chunks.reduce((s, c) => s + c.size, 0) < 1024) { setRecordingStatus('idle'); return; }
           const blob = new Blob(chunks, { type: mimeType });
-          const fd = new FormData(); fd.append('file', blob, `recording-${sessionId}.webm`);
+          const fd = new FormData();
+          fd.append('file', blob, 'recording-' + sessionId + '.webm');
           const res  = await fetch('/api/upload', { method: 'POST', body: fd });
           const data = await res.json();
           if (!res.ok) throw new Error(data.error);
-          await fetch(`/api/recordings/${sessionId}`, {
+          await fetch('/api/recordings/' + sessionId, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ status: 'READY', fileUrl: data.url }),
           });
@@ -183,14 +170,13 @@ export default function SessionPage() {
       };
       recorder.start(5000);
       mediaRecorderRef.current = recorder;
-      fetch(`/api/recordings/${sessionId}`, {
+      fetch('/api/recordings/' + sessionId, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: 'RECORDING' }),
       }).catch(() => {});
-    } catch (err) { console.error('Recording start failed:', err); setRecordingStatus('failed'); }
-  }, [isAgent, isConnected, hasRemoteParticipant, remoteStreams, sessionId]);
+    } catch (e) { console.error('Recording start failed:', e); setRecordingStatus('failed'); }
+  }, [isAgent, isConnected, hasRemoteParticipant]);
 
-  // Stop recording helper
   const stopRecording = useCallback(() => {
     if (mediaRecorderRef.current?.state === 'recording') mediaRecorderRef.current.stop();
     mediaRecorderRef.current = null;
@@ -198,15 +184,11 @@ export default function SessionPage() {
 
   const formatTime = (s: number) => {
     const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
-    if (h > 0) return `${h}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
-    return `${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
+    if (h > 0) return h + ':' + String(m).padStart(2,'0') + ':' + String(sec).padStart(2,'0');
+    return String(m).padStart(2,'0') + ':' + String(sec).padStart(2,'0');
   };
 
-  const handleSendMessage = () => {
-    if (!messageInput.trim()) return;
-    sendMessage(messageInput.trim());
-    setMessageInput('');
-  };
+  const handleSendMessage = () => { if (!messageInput.trim()) return; sendMessage(messageInput.trim()); setMessageInput(''); };
 
   const handleEndCall = async () => {
     if (timerRef.current) clearInterval(timerRef.current);
@@ -227,7 +209,6 @@ export default function SessionPage() {
       const res  = await fetch('/api/upload', { method: 'POST', body: fd });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Upload failed');
-      const isImg = /\.(jpe?g|png|gif|webp)$/i.test(file.name);
       await sendMessage(file.name, 'FILE', data.url, file.name, file.size);
     } catch (err: any) {
       setUploadError(err.message || 'Upload failed');
@@ -240,19 +221,17 @@ export default function SessionPage() {
       remoteVideoRefs.current.set(peerId, el);
       const r = remoteStreams.get(peerId);
       if (r) attachStream(el, r.stream);
-    } else {
-      remoteVideoRefs.current.delete(peerId);
-    }
+    } else { remoteVideoRefs.current.delete(peerId); }
   }, [remoteStreams, attachStream]);
 
-  // ─── Loading / Ended screens ───────────────────────────────────────────────
-
+  // ─── Loading ──────────────────────────────────────────────────────────────
   if (loading) return (
     <div className="min-h-screen flex items-center justify-center bg-background">
       <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary" />
     </div>
   );
 
+  // ─── Session ended ────────────────────────────────────────────────────────
   if (callEnded) return (
     <div className="min-h-screen flex items-center justify-center p-4 bg-background">
       <div className="text-center space-y-6 max-w-md w-full">
@@ -266,29 +245,27 @@ export default function SessionPage() {
           <p className="text-muted-foreground mt-2">{sessionInfo?.title}<br/>Duration: {formatTime(callDuration)}</p>
         </div>
         <div className="flex gap-3 justify-center flex-wrap">
-          <Button variant="outline" onClick={() => router.push(`/history/${sessionId}`)}>View History</Button>
+          <Button variant="outline" onClick={() => router.push('/history/' + sessionId)}>View History</Button>
           <Button onClick={() => router.push(isAgent ? '/agent' : '/customer')}>Back to Dashboard</Button>
         </div>
       </div>
     </div>
   );
 
-  // ─── Derived state ─────────────────────────────────────────────────────────
+  // ─── Derived ──────────────────────────────────────────────────────────────
   const remoteStreamEntries = Array.from(remoteStreams.entries());
-  const hasRemote           = remoteStreamEntries.length > 0;
-  const hasLocalVideo       = (localStream?.getVideoTracks() ?? []).some((t) => t.readyState === 'live');
-  const modeLabel           = supportMode === 'chat' ? 'Chat' : supportMode === 'voice' ? 'Voice' : 'Video';
-  const modeBg              = supportMode === 'chat' ? 'bg-blue-500/20 text-blue-400 border-blue-500/30'
-                            : supportMode === 'voice' ? 'bg-amber-500/20 text-amber-400 border-amber-500/30'
-                            : 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30';
+  const hasRemote = remoteStreamEntries.length > 0;
+  const modeLabel = supportMode === 'chat' ? 'Chat' : supportMode === 'voice' ? 'Voice' : 'Video';
+  const modeBg =
+    supportMode === 'chat'  ? 'bg-blue-500/20 text-blue-400 border-blue-500/30' :
+    supportMode === 'voice' ? 'bg-amber-500/20 text-amber-400 border-amber-500/30' :
+                              'bg-emerald-500/20 text-emerald-400 border-emerald-500/30';
 
-  // ─── Main render ───────────────────────────────────────────────────────────
   return (
     <div className="h-[100dvh] flex flex-col bg-background overflow-hidden">
 
-      {/* ══ TOP BAR ═══════════════════════════════════════════════════════════ */}
+      {/* TOP BAR */}
       <header className="flex items-center justify-between px-3 py-2 border-b border-border bg-card shrink-0 z-40">
-        {/* Left: logo + session info */}
         <div className="flex items-center gap-2.5 min-w-0">
           <div className="w-7 h-7 rounded-lg bg-primary/20 flex items-center justify-center shrink-0">
             <MessageSquare size={14} className="text-primary" />
@@ -298,92 +275,66 @@ export default function SessionPage() {
               {sessionInfo?.title || 'Support Session'}
             </p>
             <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-              {/* Socket status dot */}
               {socketStatus === 'connecting'   && <><span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse shrink-0" /><span>Connecting</span></>}
               {socketStatus === 'connected'    && <><span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse shrink-0" /><span className="text-emerald-500 font-semibold">Live</span></>}
               {socketStatus === 'disconnected' && <><span className="w-1.5 h-1.5 rounded-full bg-zinc-500 shrink-0" /><span className="text-zinc-400">Offline</span></>}
               {socketStatus === 'failed'       && <><span className="w-1.5 h-1.5 rounded-full bg-red-500 shrink-0" /><span className="text-red-400">Failed</span></>}
-              {isConnected && <><span className="opacity-30">·</span><span>{formatTime(callDuration)}</span></>}
-              <span className="opacity-30">·</span>
-              <span>{peers.length + 1}p</span>
+              {isConnected && <><span className="opacity-30">|</span><span>{formatTime(callDuration)}</span></>}
+              <span className="opacity-30">|</span><span>{peers.length + 1}p</span>
               {networkHost && process.env.NODE_ENV !== 'production' && (
-                <><span className="opacity-30">·</span><span className="font-mono opacity-50 hidden sm:inline">{networkHost}</span></>
+                <><span className="opacity-30">|</span><span className="font-mono opacity-50 hidden sm:inline">{networkHost}</span></>
               )}
             </div>
           </div>
         </div>
-
-        {/* Right: mode badge + controls */}
         <div className="flex items-center gap-1 shrink-0">
-          <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium border ${modeBg}`}>{modeLabel}</span>
+          <span className={'text-[10px] px-2 py-0.5 rounded-full font-medium border ' + modeBg}>{modeLabel}</span>
           <ThemeToggle />
-          <button
-            onClick={() => setChatOpen((o) => !o)}
-            className={`p-1.5 rounded-lg transition-colors ${chatOpen ? 'bg-primary/15 text-primary' : 'text-muted-foreground hover:text-foreground hover:bg-muted'}`}
-            title="Toggle chat"
-          >
+          <button onClick={() => setChatOpen((o) => !o)}
+            className={'p-1.5 rounded-lg transition-colors ' + (chatOpen ? 'bg-primary/15 text-primary' : 'text-muted-foreground hover:text-foreground hover:bg-muted')}
+            title="Toggle chat">
             <MessageSquare size={16} />
           </button>
         </div>
       </header>
 
-      {/* ══ MEDIA WARNING ════════════════════════════════════════════════════ */}
+      {/* MEDIA WARNING */}
       {mediaWarning && (
         <div className="bg-amber-500/10 border-b border-amber-500/20 px-3 py-1.5 flex items-center justify-between text-xs text-amber-400 shrink-0">
-          <div className="flex items-center gap-1.5 min-w-0">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0">
-              <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
-              <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
-            </svg>
-            <span className="truncate">{mediaWarning}</span>
-          </div>
+          <span className="truncate">{mediaWarning}</span>
           <button className="ml-2 shrink-0 p-1 rounded" onClick={clearMediaWarning}><X size={12} /></button>
         </div>
       )}
 
-      {/* ══ BODY: VIDEO + CHAT ════════════════════════════════════════════════ */}
+      {/* BODY */}
       <div className="flex-1 flex overflow-hidden min-h-0">
 
-        {/* ── VIDEO COLUMN ──────────────────────────────────────────────────── */}
-        <div className={`flex flex-col overflow-hidden transition-all duration-200 ${
-          chatOpen ? 'flex-1 min-w-0' : 'flex-1'
-        }`}>
+        {/* VIDEO COLUMN */}
+        <div className="flex-1 flex flex-col overflow-hidden min-w-0">
 
           {/* Video area */}
           <div className="flex-1 relative overflow-hidden min-h-0 bg-zinc-950">
 
-            {/* Connecting overlay */}
             {isConnecting && !isConnected && (
               <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-zinc-950">
                 <div className="animate-spin rounded-full h-9 w-9 border-b-2 border-primary mb-3" />
-                <p className="text-sm text-muted-foreground font-medium">Joining session…</p>
-                <p className="text-[11px] text-muted-foreground/50 mt-1">→ {networkHost || 'server'}:3001</p>
+                <p className="text-sm text-muted-foreground font-medium">Joining session...</p>
+                <p className="text-[11px] text-muted-foreground/50 mt-1">{networkHost || 'server'}:3001</p>
               </div>
             )}
 
-            {/* Remote video(s) */}
             {hasRemote ? (
               <div className="absolute inset-0 flex">
                 {remoteStreamEntries.map(([peerId, remote]) => (
                   <div key={peerId} className="relative flex-1 bg-zinc-900">
-                    <video
-                      ref={setRemoteVideoRef(peerId)}
-                      autoPlay playsInline
-                      className="w-full h-full object-cover"
-                    />
-                    {/* Peer name tag */}
+                    <video ref={setRemoteVideoRef(peerId)} autoPlay playsInline className="w-full h-full object-cover" />
                     <div className="absolute bottom-3 left-3 flex items-center gap-1.5">
-                      <span className="text-xs bg-black/70 backdrop-blur-sm text-white px-2 py-0.5 rounded-full font-medium">
-                        {remote.peerName}
-                      </span>
-                      {!remote.audioEnabled && (
-                        <span className="text-xs bg-red-600/80 text-white px-1.5 py-0.5 rounded-full">🔇</span>
-                      )}
+                      <span className="text-xs bg-black/70 backdrop-blur-sm text-white px-2 py-0.5 rounded-full font-medium">{remote.peerName}</span>
+                      {!remote.audioEnabled && <span className="text-xs bg-red-600/80 text-white px-1.5 py-0.5 rounded-full">muted</span>}
                     </div>
-                    {/* Escalation mini-buttons overlaid on video */}
                     {supportMode !== 'video' && isConnected && (
                       <div className="absolute top-3 right-3 flex flex-col gap-1.5">
-                        {supportMode === 'chat' && (
+                        {supportMode === 'chat' && isAgent && (
                           <button onClick={startVoice}
                             className="text-xs bg-black/60 hover:bg-amber-500/80 text-white px-2.5 py-1 rounded-full backdrop-blur-sm transition-colors flex items-center gap-1">
                             <PhoneCall size={11} /> Voice
@@ -392,11 +343,11 @@ export default function SessionPage() {
                         {isAgent && (
                           <button onClick={requestCustomerVideo} disabled={videoRequestPending}
                             className="text-xs bg-black/60 hover:bg-emerald-500/80 text-white px-2.5 py-1 rounded-full backdrop-blur-sm transition-colors flex items-center gap-1 disabled:opacity-50">
-                            <Video size={11} />{videoRequestPending ? 'Waiting…' : 'Req. Cam'}
+                            <Video size={11} />{videoRequestPending ? 'Waiting...' : 'Req. Cam'}
                           </button>
                         )}
                         {!isAgent && supportMode === 'voice' && (
-                          <button onClick={startVideo}
+                          <button onClick={() => startVideo('user')}
                             className="text-xs bg-black/60 hover:bg-emerald-500/80 text-white px-2.5 py-1 rounded-full backdrop-blur-sm transition-colors flex items-center gap-1">
                             <Video size={11} /> Camera
                           </button>
@@ -407,7 +358,6 @@ export default function SessionPage() {
                 ))}
               </div>
             ) : (
-              /* Empty state — no remote stream yet */
               <div className="absolute inset-0 flex flex-col items-center justify-center">
                 {isConnected ? (
                   <div className="text-center px-6 max-w-xs w-full">
@@ -416,28 +366,26 @@ export default function SessionPage() {
                     </div>
                     <p className="text-sm font-semibold text-foreground">Session Active</p>
                     <p className="text-xs text-muted-foreground mt-1 mb-4">
-                      {peers.length === 0 ? 'Waiting for the other participant…' : 'Chat is ready. Escalate to voice or video below.'}
+                      {peers.length === 0 ? 'Waiting for the other participant...' : 'Chat ready. Escalate to voice or video below.'}
                     </p>
-                    {/* Escalation buttons in empty state */}
                     <div className="flex flex-col gap-2">
-                      {supportMode === 'chat' && (
+                      {isAgent && supportMode === 'chat' && (
                         <button onClick={startVoice}
                           className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-amber-500/40 text-amber-400 bg-amber-500/5 hover:bg-amber-500/15 transition-colors text-sm font-medium">
                           <PhoneCall size={16} /> Start Voice Support
                         </button>
                       )}
-                      {supportMode !== 'video' && (
-                        isAgent ? (
-                          <button onClick={requestCustomerVideo} disabled={videoRequestPending}
-                            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-emerald-500/40 text-emerald-400 bg-emerald-500/5 hover:bg-emerald-500/15 transition-colors text-sm font-medium disabled:opacity-50">
-                            <Video size={16} />{videoRequestPending ? 'Waiting for customer…' : 'Request Customer Camera'}
-                          </button>
-                        ) : (
-                          <button onClick={startVideo}
-                            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-emerald-500/40 text-emerald-400 bg-emerald-500/5 hover:bg-emerald-500/15 transition-colors text-sm font-medium">
-                            <Video size={16} /> Enable My Camera
-                          </button>
-                        )
+                      {isAgent && supportMode !== 'video' && (
+                        <button onClick={requestCustomerVideo} disabled={videoRequestPending}
+                          className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-emerald-500/40 text-emerald-400 bg-emerald-500/5 hover:bg-emerald-500/15 transition-colors text-sm font-medium disabled:opacity-50">
+                          <Video size={16} />{videoRequestPending ? 'Waiting for customer...' : 'Request Customer Camera'}
+                        </button>
+                      )}
+                      {!isAgent && supportMode !== 'video' && (
+                        <button onClick={() => startVideo('user')}
+                          className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-emerald-500/40 text-emerald-400 bg-emerald-500/5 hover:bg-emerald-500/15 transition-colors text-sm font-medium">
+                          <Video size={16} /> Enable My Camera
+                        </button>
                       )}
                     </div>
                   </div>
@@ -447,35 +395,51 @@ export default function SessionPage() {
               </div>
             )}
 
-            {/* Self-view PiP */}
-            {hasLocalVideo && (
+            {/* Self-view PiP - always show when in voice/video mode */}
+            {supportMode !== 'chat' && (
               <div className="absolute bottom-16 right-2 md:bottom-20 md:right-3 w-24 h-[4.5rem] md:w-32 md:h-24 rounded-xl overflow-hidden shadow-xl border border-border z-10 bg-zinc-900">
                 <video ref={localVideoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
-                {!isVideoEnabled && (
+                {supportMode === 'voice' && (
                   <div className="absolute inset-0 bg-zinc-900 flex items-center justify-center">
-                    <VideoOff size={16} className="text-muted-foreground" />
+                    <Mic size={18} className="text-amber-400" />
+                  </div>
+                )}
+                {supportMode === 'video' && !isVideoEnabled && (
+                  <div className="absolute inset-0 bg-zinc-900 flex items-center justify-center">
+                    <VideoOff size={18} className="text-muted-foreground" />
                   </div>
                 )}
                 <span className="absolute bottom-1 left-1 text-[9px] bg-black/60 text-white px-1.5 rounded-full">You</span>
+                {/* Camera flip button - customer, video mode, camera on */}
+                {!isAgent && supportMode === 'video' && isVideoEnabled && (
+                  <button onClick={switchCamera}
+                    title={facingMode === 'user' ? 'Switch to back camera' : 'Switch to front camera'}
+                    className="absolute top-1 right-1 w-6 h-6 rounded-full bg-black/70 hover:bg-black/90 flex items-center justify-center text-white transition-colors">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M1 4v6h6"/><path d="M23 20v-6h-6"/>
+                      <path d="M20.49 9A9 9 0 005.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 013.51 15"/>
+                    </svg>
+                  </button>
+                )}
               </div>
             )}
           </div>
 
-          {/* Recording indicator (agent only) */}
+          {/* Recording bar (agent only) */}
           {isAgent && recordingStatus !== 'idle' && (
-            <div className={`flex items-center gap-2 px-3 py-1.5 text-xs border-t ${
+            <div className={'flex items-center gap-2 px-3 py-1.5 text-xs border-t shrink-0 ' + (
               recordingStatus === 'recording'  ? 'bg-red-500/8 border-red-500/20 text-red-400' :
               recordingStatus === 'processing' ? 'bg-amber-500/8 border-amber-500/20 text-amber-400' :
               recordingStatus === 'ready'      ? 'bg-emerald-500/8 border-emerald-500/20 text-emerald-400' :
                                                  'bg-zinc-500/8 border-zinc-500/20 text-zinc-400'
-            } shrink-0`}>
+            )}>
               {recordingStatus === 'recording' && (
                 <><span className="relative flex h-2 w-2 shrink-0">
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-500 opacity-75" />
                   <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500" />
                 </span><span className="font-medium">Recording</span><span className="ml-auto opacity-60 text-[10px]">Customer only</span></>
               )}
-              {recordingStatus === 'processing' && <><div className="animate-spin rounded-full h-3 w-3 border-b border-current shrink-0" /><span>Processing…</span></>}
+              {recordingStatus === 'processing' && <><div className="animate-spin rounded-full h-3 w-3 border-b border-current shrink-0" /><span>Processing...</span></>}
               {recordingStatus === 'ready' && (
                 <><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="shrink-0"><polyline points="20 6 9 17 4 12"/></svg>
                 <span>Recording ready</span>
@@ -487,60 +451,54 @@ export default function SessionPage() {
 
           {/* CONTROLS BAR */}
           <div className="flex items-center justify-center gap-2 py-3 px-4 bg-card border-t border-border shrink-0">
-
-            {/* Mute toggle - both agent and customer when in voice/video */}
+            {/* Mute - both in voice/video */}
             {supportMode !== 'chat' && (
-              <button onClick={toggleAudio}
-                title={isAudioEnabled ? 'Mute microphone' : 'Unmute microphone'}
-                className={`w-11 h-11 rounded-full flex items-center justify-center transition-all active:scale-95 shadow-md ${
-                  isAudioEnabled ? 'bg-secondary text-secondary-foreground' : 'bg-red-600 text-white'
-                }`}>
+              <button onClick={toggleAudio} title={isAudioEnabled ? 'Mute' : 'Unmute'}
+                className={'w-11 h-11 rounded-full flex items-center justify-center transition-all active:scale-95 shadow-md ' + (isAudioEnabled ? 'bg-secondary text-secondary-foreground' : 'bg-red-600 text-white')}>
                 {isAudioEnabled ? <Mic size={18} /> : <MicOff size={18} />}
               </button>
             )}
-
-            {/* Camera toggle - both agent and customer when in video mode */}
+            {/* Camera toggle - both in video */}
             {supportMode === 'video' && (
-              <button onClick={toggleVideo}
-                title={isVideoEnabled ? 'Turn camera off' : 'Turn camera on'}
-                className={`w-11 h-11 rounded-full flex items-center justify-center transition-all active:scale-95 shadow-md ${
-                  isVideoEnabled ? 'bg-secondary text-secondary-foreground' : 'bg-red-600 text-white'
-                }`}>
+              <button onClick={toggleVideo} title={isVideoEnabled ? 'Camera off' : 'Camera on'}
+                className={'w-11 h-11 rounded-full flex items-center justify-center transition-all active:scale-95 shadow-md ' + (isVideoEnabled ? 'bg-secondary text-secondary-foreground' : 'bg-red-600 text-white')}>
                 {isVideoEnabled ? <Video size={18} /> : <VideoOff size={18} />}
               </button>
             )}
-
-            {/* Stop media (back to chat) - both when in voice/video */}
+            {/* Camera flip - customer, video, camera on */}
+            {!isAgent && supportMode === 'video' && isVideoEnabled && (
+              <button onClick={switchCamera} title={facingMode === 'user' ? 'Switch to back camera' : 'Switch to front camera'}
+                className="w-11 h-11 rounded-full flex items-center justify-center bg-muted text-muted-foreground hover:bg-muted/80 transition-all active:scale-95 shadow-md">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M1 4v6h6"/><path d="M23 20v-6h-6"/>
+                  <path d="M20.49 9A9 9 0 005.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 013.51 15"/>
+                </svg>
+              </button>
+            )}
+            {/* Stop media */}
             {supportMode !== 'chat' && (
-              <button onClick={stopMedia}
-                title="Stop audio/video"
+              <button onClick={stopMedia} title="Stop audio/video"
                 className="w-11 h-11 rounded-full flex items-center justify-center bg-muted text-muted-foreground transition-all active:scale-95 hover:bg-muted/80 shadow-md">
                 <MicOff size={16} />
               </button>
             )}
-
-            {/* Voice start - AGENT only in chat mode */}
+            {/* Start voice - agent, chat mode */}
             {isAgent && isConnected && supportMode === 'chat' && (
-              <button onClick={startVoice}
-                title="Start Voice Support"
+              <button onClick={startVoice} title="Start Voice Support"
                 className="w-11 h-11 rounded-full flex items-center justify-center bg-amber-500/15 border border-amber-500/40 text-amber-400 transition-all active:scale-95 hover:bg-amber-500/25 shadow-md">
                 <PhoneCall size={18} />
               </button>
             )}
-
-            {/* End session - AGENT only (red prominent button) */}
+            {/* End - agent only */}
             {isAgent && (
-              <button onClick={handleEndCall}
-                title="End Session for everyone"
+              <button onClick={handleEndCall} title="End Session"
                 className="w-14 h-11 rounded-full flex items-center justify-center bg-red-600 hover:bg-red-700 text-white shadow-lg transition-all active:scale-95">
                 <PhoneOff size={18} />
               </button>
             )}
-
-            {/* Leave - CUSTOMER only (subtle, no red button) */}
+            {/* Leave - customer only (subtle) */}
             {!isAgent && (
-              <button onClick={handleLeaveCall}
-                title="Leave session"
+              <button onClick={handleLeaveCall} title="Leave session"
                 className="px-4 h-9 rounded-full flex items-center justify-center gap-1.5 bg-muted text-muted-foreground hover:bg-muted/80 transition-all active:scale-95 text-xs font-medium shadow-md">
                 <PhoneOff size={14} /> Leave
               </button>
@@ -548,15 +506,13 @@ export default function SessionPage() {
           </div>
         </div>
 
-        {/* ── CHAT PANEL ────────────────────────────────────────────────────── */}
+        {/* CHAT PANEL */}
         {chatOpen && (
           <aside className="w-72 sm:w-80 flex flex-col border-l border-border bg-card shrink-0 overflow-hidden">
-
-            {/* Chat header */}
             <div className="flex items-center justify-between px-3 py-2 border-b border-border shrink-0">
               <div className="flex items-center gap-2">
                 <span className="text-sm font-semibold">Chat</span>
-                <span className={`text-[10px] px-1.5 py-0.5 rounded-full border font-medium ${modeBg}`}>{modeLabel}</span>
+                <span className={'text-[10px] px-1.5 py-0.5 rounded-full border font-medium ' + modeBg}>{modeLabel}</span>
                 {chatMessages.length > 0 && (
                   <span className="text-[10px] bg-muted text-muted-foreground px-1.5 py-0.5 rounded-full">{chatMessages.length}</span>
                 )}
@@ -566,7 +522,7 @@ export default function SessionPage() {
               </button>
             </div>
 
-            {/* Messages - scrollable area */}
+            {/* Messages - native scrollable div */}
             <div className="flex-1 overflow-y-auto min-h-0">
               <div className="p-3 space-y-3">
                 {chatMessages.length === 0 ? (
@@ -581,30 +537,26 @@ export default function SessionPage() {
                     const isImg = msg.fileUrl && /\.(jpe?g|png|gif|webp)$/i.test(msg.fileUrl);
                     const isPdf = msg.fileUrl && (msg.fileUrl.includes('.pdf') || (msg.type === 'FILE' && msg.fileName?.endsWith('.pdf')));
                     return (
-                      <div key={msg.id} className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
+                      <div key={msg.id} className={'flex flex-col ' + (isMe ? 'items-end' : 'items-start')}>
                         <div className="flex items-center gap-1 mb-0.5">
                           <span className="text-[10px] font-medium text-muted-foreground">{isMe ? 'You' : msg.senderName}</span>
-                          <span className={`text-[9px] px-1 rounded font-medium ${
-                            msg.senderRole === 'AGENT' ? 'bg-blue-500/15 text-blue-400' : 'bg-emerald-500/15 text-emerald-400'
-                          }`}>{msg.senderRole}</span>
+                          <span className={'text-[9px] px-1 rounded font-medium ' + (msg.senderRole === 'AGENT' ? 'bg-blue-500/15 text-blue-400' : 'bg-emerald-500/15 text-emerald-400')}>
+                            {msg.senderRole}
+                          </span>
                         </div>
-                        <div className={`rounded-2xl overflow-hidden text-sm max-w-[90%] ${
-                          isMe ? 'bg-primary text-primary-foreground rounded-br-sm' : 'bg-muted rounded-bl-sm'
-                        }`}>
+                        <div className={'rounded-2xl overflow-hidden text-sm max-w-[90%] ' + (isMe ? 'bg-primary text-primary-foreground rounded-br-sm' : 'bg-muted rounded-bl-sm')}>
                           {msg.type === 'FILE' && msg.fileUrl ? (
                             isImg ? (
                               <a href={msg.fileUrl} target="_blank" rel="noopener noreferrer">
                                 <img src={msg.fileUrl} alt={msg.fileName || 'Image'}
                                   className="max-w-full object-cover max-h-44 w-full block"
-                                  onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                                />
+                                  onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />
                               </a>
                             ) : (
-                              <a
-                                href={isPdf ? `https://docs.google.com/viewer?url=${encodeURIComponent(msg.fileUrl)}` : msg.fileUrl}
+                              <a href={isPdf ? 'https://docs.google.com/viewer?url=' + encodeURIComponent(msg.fileUrl) : msg.fileUrl}
                                 target="_blank" rel="noopener noreferrer"
                                 className="flex items-center gap-2 px-3 py-2.5">
-                                <span className="text-base">{isPdf ? '📄' : '📎'}</span>
+                                <span className="text-base">{isPdf ? '\uD83D\uDCC4' : '\uD83D\uDCCE'}</span>
                                 <span className="text-xs underline truncate max-w-[140px]">{msg.fileName || 'File'}</span>
                               </a>
                             )
@@ -623,7 +575,6 @@ export default function SessionPage() {
               </div>
             </div>
 
-            {/* Upload error */}
             {uploadError && (
               <div className="mx-2 mb-1 p-2 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-xs flex items-center justify-between shrink-0">
                 <span className="truncate">{uploadError}</span>
@@ -631,34 +582,23 @@ export default function SessionPage() {
               </div>
             )}
 
-            {/* Input bar */}
             <div className="p-2 border-t border-border shrink-0 bg-card">
               <input ref={fileInputRef} type="file" accept="image/*,.pdf" className="hidden" onChange={handleFileUpload} />
               <div className="flex items-center gap-1.5">
-                <button
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={uploadingFile || !isConnected}
-                  className="w-8 h-8 rounded-lg flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-40 shrink-0"
-                  title="Attach file"
-                >
-                  {uploadingFile
-                    ? <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-current" />
-                    : <Paperclip size={15} />}
+                <button onClick={() => fileInputRef.current?.click()} disabled={uploadingFile || !isConnected}
+                  className="w-8 h-8 rounded-lg flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-40 shrink-0" title="Attach file">
+                  {uploadingFile ? <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-current" /> : <Paperclip size={15} />}
                 </button>
                 <Input
-                  placeholder={isConnected ? 'Message…' : 'Connecting…'}
+                  placeholder={isConnected ? 'Message...' : 'Connecting...'}
                   value={messageInput}
                   onChange={(e) => setMessageInput(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && handleSendMessage()}
                   disabled={!isConnected}
                   className="flex-1 h-8 text-sm rounded-lg px-3"
                 />
-                <button
-                  onClick={handleSendMessage}
-                  disabled={!messageInput.trim() || !isConnected}
-                  className="w-8 h-8 rounded-lg flex items-center justify-center bg-primary text-primary-foreground disabled:opacity-40 transition-all active:scale-95 shrink-0"
-                  title="Send"
-                >
+                <button onClick={handleSendMessage} disabled={!messageInput.trim() || !isConnected}
+                  className="w-8 h-8 rounded-lg flex items-center justify-center bg-primary text-primary-foreground disabled:opacity-40 transition-all active:scale-95 shrink-0" title="Send">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                     <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
                   </svg>
@@ -669,7 +609,7 @@ export default function SessionPage() {
         )}
       </div>
 
-      {/* ══ CONNECTION ERROR MODAL ════════════════════════════════════════════ */}
+      {/* CONNECTION ERROR MODAL */}
       {error && (
         <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4 bg-background/80 backdrop-blur-sm">
           <div className="bg-card border border-red-500/30 rounded-2xl shadow-2xl w-full max-w-sm">
@@ -688,16 +628,14 @@ export default function SessionPage() {
               </div>
               <div className="flex gap-2">
                 <Button size="sm" className="flex-1" onClick={() => { clearError(); connect(); }}>Retry</Button>
-                <Button size="sm" variant="outline" className="flex-1" onClick={() => { clearError(); router.push(isAgent ? '/agent' : '/customer'); }}>
-                  Go Back
-                </Button>
+                <Button size="sm" variant="outline" className="flex-1" onClick={() => { clearError(); router.push(isAgent ? '/agent' : '/customer'); }}>Go Back</Button>
               </div>
             </div>
           </div>
         </div>
       )}
 
-      {/* ══ INCOMING VIDEO REQUEST DIALOG ════════════════════════════════════ */}
+      {/* INCOMING VIDEO REQUEST */}
       {incomingVideoRequest && (
         <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4 bg-background/80 backdrop-blur-sm">
           <div className="bg-card border border-border rounded-2xl shadow-2xl w-full max-w-sm">
@@ -713,15 +651,12 @@ export default function SessionPage() {
               </div>
               <p className="text-sm text-muted-foreground">
                 Your support agent needs your camera for visual troubleshooting.
-                Your camera will only be active during this session.
               </p>
               <div className="flex gap-2">
                 <Button className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white h-10" onClick={() => respondToVideoRequest(true)}>
                   <Video size={15} className="mr-1.5" /> Allow
                 </Button>
-                <Button variant="outline" className="flex-1 h-10" onClick={() => respondToVideoRequest(false)}>
-                  Decline
-                </Button>
+                <Button variant="outline" className="flex-1 h-10" onClick={() => respondToVideoRequest(false)}>Decline</Button>
               </div>
             </div>
           </div>
