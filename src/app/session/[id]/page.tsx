@@ -307,7 +307,7 @@ export default function SessionPage() {
               {sessionInfo?.title || 'Support Session'}
             </p>
             <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-              {socketStatus === 'connecting'   && <><span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse shrink-0" /><span>Connecting</span></>}
+              {socketStatus === 'connecting'   && <><span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse shrink-0" /><span>Connecting…</span></>}
               {socketStatus === 'connected'    && <><span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse shrink-0" /><span className="text-emerald-500 font-semibold">Live</span></>}
               {socketStatus === 'disconnected' && <><span className="w-1.5 h-1.5 rounded-full bg-zinc-500 shrink-0" /><span className="text-zinc-400">Offline</span></>}
               {socketStatus === 'failed'       && <><span className="w-1.5 h-1.5 rounded-full bg-red-500 shrink-0" /><span className="text-red-400">Failed</span></>}

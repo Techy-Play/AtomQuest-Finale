@@ -309,83 +309,105 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
 
   const connect = useCallback(async () => {
     if (socketRef.current?.connected) return;
-    setIsConnecting(true);
-    setError(null);
-    resetTransports();
-    deviceRef.current = null;
 
-    try {
-      const socketHost = window.location.hostname;
-      const url = process.env.NEXT_PUBLIC_SOCKET_URL || `${window.location.protocol}//${socketHost}:3001`;
-      console.log('[ConnectDesk] Connecting:', url, '| Session:', sessionIdRef.current);
+    const MAX_ATTEMPTS = 8;
+    const RETRY_DELAY_MS = 3000;
+    const ATTEMPT_TIMEOUT_MS = 5000; // fail fast per attempt; retry handles the rest
 
-      const socket = io(url, {
-        path: '/socket.io',
-        transports: ['polling', 'websocket'],
-        reconnection: false,
-        timeout: 20000,   // 20s - enough for mobile on WiFi
-        forceNew: true,
-      });
-      socketRef.current = socket;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      if (socketRef.current?.connected) return; // another attempt may have won
+      setIsConnecting(true);
+      setError(null);
+      resetTransports();
+      deviceRef.current = null;
 
-      await new Promise<void>((resolve, reject) => {
-        const t = setTimeout(() => {
-          socket.disconnect();
-          reject(new Error(
-            `Connection timed out after 20s.\n` +
-            `- Is the SFU server running? (npm run dev:all)\n` +
-            `- On mobile? Run open-firewall-ports.ps1 as Administrator.\n` +
-            `- SFU URL tried: ${url}`
-          ));
-        }, 20000);
-        socket.on('connect', () => { clearTimeout(t); resolve(); });
-        socket.on('connect_error', (err) => {
-          clearTimeout(t); socket.disconnect();
-          reject(new Error(
-            `Cannot reach SFU at ${url}\n` +
-            `Detail: ${err.message}\n` +
-            `On mobile? Run open-firewall-ports.ps1 as Administrator.`
-          ));
+      try {
+        const socketHost = window.location.hostname;
+        const url = process.env.NEXT_PUBLIC_SOCKET_URL || `${window.location.protocol}//${socketHost}:3001`;
+        console.log(`[ConnectDesk] Connecting (attempt ${attempt}/${MAX_ATTEMPTS}):`, url);
+
+        const socket = io(url, {
+          path: '/socket.io',
+          transports: ['polling', 'websocket'],
+          reconnection: false,
+          timeout: ATTEMPT_TIMEOUT_MS,
+          forceNew: true,
         });
-      });
+        socketRef.current = socket;
 
-      console.log('[ConnectDesk] Socket connected:', socket.id);
+        await new Promise<void>((resolve, reject) => {
+          const t = setTimeout(() => {
+            socket.disconnect();
+            reject(new Error('RETRY')); // signal to retry, not a fatal error
+          }, ATTEMPT_TIMEOUT_MS + 1000);
+          socket.on('connect', () => { clearTimeout(t); resolve(); });
+          socket.on('connect_error', (err) => {
+            clearTimeout(t);
+            socket.disconnect();
+            // ECONNREFUSED = server not up yet → retry silently
+            const isTransient = err.message.includes('ECONNREFUSED')
+              || err.message.includes('xhr poll error')
+              || err.message.includes('transport error')
+              || err.message.includes('timeout');
+            reject(new Error(isTransient ? 'RETRY' : err.message));
+          });
+        });
 
-      const joinData = await emitAsync('join-room', {
-        sessionId: sessionIdRef.current, userId: userIdRef.current,
-        name: userNameRef.current, role: userRoleRef.current,
-      });
-      console.log('[ConnectDesk] Joined | existing peers:', joinData.existingPeers?.length ?? 0);
+        // ── Connected successfully — run setup ──
+        console.log('[ConnectDesk] Socket connected:', socket.id);
 
-      const device = new mediasoupClient.Device();
-      await device.load({ routerRtpCapabilities: joinData.routerRtpCapabilities });
-      deviceRef.current = device;
+        const joinData = await emitAsync('join-room', {
+          sessionId: sessionIdRef.current, userId: userIdRef.current,
+          name: userNameRef.current, role: userRoleRef.current,
+        });
+        console.log('[ConnectDesk] Joined | existing peers:', joinData.existingPeers?.length ?? 0);
 
-      await createRecvTransport();
+        const device = new mediasoupClient.Device();
+        await device.load({ routerRtpCapabilities: joinData.routerRtpCapabilities });
+        deviceRef.current = device;
 
-      const existingPeers: PeerInfo[] = joinData.existingPeers || [];
-      // Update ref SYNCHRONOUSLY before registering socket events so that
-      // `new-producer` handler immediately sees the correct peer list.
-      peersRef.current = existingPeers;
-      setPeers(existingPeers);
-      for (const peer of existingPeers) {
-        if (peer.producers && peer.producers.length > 0) {
-          for (const prod of peer.producers) await consumeProducer(prod.id, peer.socketId, peer.name, peer.role);
+        await createRecvTransport();
+
+        const existingPeers: PeerInfo[] = joinData.existingPeers || [];
+        peersRef.current = existingPeers;
+        setPeers(existingPeers);
+        for (const peer of existingPeers) {
+          if (peer.producers && peer.producers.length > 0) {
+            for (const prod of peer.producers) await consumeProducer(prod.id, peer.socketId, peer.name, peer.role);
+          }
         }
-      }
 
-      registerSocketEvents(socket);
-      setIsConnected(true);
-      setSupportMode('chat');
-    } catch (err: any) {
-      console.error('[ConnectDesk] Connect failed:', err.message);
-      setError(err.message || 'Failed to connect');
-      socketRef.current?.disconnect();
-      socketRef.current = null;
-    } finally {
-      setIsConnecting(false);
+        registerSocketEvents(socket);
+        setIsConnected(true);
+        setIsConnecting(false);
+        setSupportMode('chat');
+        return; // ✅ success — exit the retry loop
+
+      } catch (err: any) {
+        socketRef.current?.disconnect();
+        socketRef.current = null;
+
+        if (err.message === 'RETRY' && attempt < MAX_ATTEMPTS) {
+          console.log(`[ConnectDesk] SFU not ready yet — retrying in ${RETRY_DELAY_MS / 1000}s (${attempt}/${MAX_ATTEMPTS})`);
+          await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+          continue;
+        }
+
+        // Out of retries or non-transient error
+        const socketHost = window.location.hostname;
+        const url = process.env.NEXT_PUBLIC_SOCKET_URL || `${window.location.protocol}//${socketHost}:3001`;
+        const msg = err.message === 'RETRY'
+          ? `Could not reach SFU after ${MAX_ATTEMPTS} attempts.\n- Is npm run dev:all running?\n- On mobile? Run open-firewall-ports.ps1 as Administrator.\n- SFU URL: ${url}`
+          : err.message;
+        console.error('[ConnectDesk] Connect failed:', msg);
+        setError(msg);
+        break;
+      }
     }
+
+    setIsConnecting(false);
   }, [emitAsync, createRecvTransport, consumeProducer, registerSocketEvents, resetTransports]);
+
 
   // --------------------------------------------------------------------------
   // startVoice()
