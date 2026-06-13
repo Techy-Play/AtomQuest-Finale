@@ -28,6 +28,9 @@ export default function SessionPage() {
   const [uploadingFile, setUploadingFile] = useState(false);
   const [uploadError,   setUploadError]   = useState<string | null>(null);
 
+  const [networkHost,    setNetworkHost]    = useState<string>('');
+  const [socketStatus,   setSocketStatus]   = useState<'connecting' | 'connected' | 'disconnected' | 'failed'>('connecting');
+
   const fileInputRef     = useRef<HTMLInputElement>(null);
   const localVideoRef    = useRef<HTMLVideoElement>(null);
   const remoteVideoRefs  = useRef<Map<string, HTMLVideoElement>>(new Map());
@@ -59,11 +62,26 @@ export default function SessionPage() {
 
   const isAgent = user?.role === 'AGENT' || user?.role === 'ADMIN';
 
+  // Capture hostname for display in dev mode
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      setNetworkHost(window.location.hostname);
+    }
+  }, []);
+
   useEffect(() => {
     if (loading || !user) return;
     connect();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, user]);
+
+  // Keep socketStatus in sync with connection state
+  useEffect(() => {
+    if (isConnecting) setSocketStatus('connecting');
+    else if (isConnected) setSocketStatus('connected');
+    else if (error) setSocketStatus('failed');
+    else setSocketStatus('disconnected');
+  }, [isConnecting, isConnected, error]);
 
   useEffect(() => {
     if (loading || !user) return;
@@ -224,12 +242,29 @@ export default function SessionPage() {
           </div>
           <div>
             <h1 className="text-sm font-semibold">{sessionInfo?.title || 'Support Session'}</h1>
-            <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              {isConnecting && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />Connecting...</span>}
-              {isConnected  && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />Connected</span>}
-              {isConnected  && <><Separator orientation="vertical" className="h-3" /><span>{formatTime(callDuration)}</span></>}
+            <div className="flex items-center gap-2 text-xs text-muted-foreground flex-wrap">
+              {/* Socket connection status */}
+              {socketStatus === 'connecting' && (
+                <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" /><span>Connecting...</span></span>
+              )}
+              {socketStatus === 'connected' && (
+                <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" /><span className="text-emerald-500 font-medium">Connected</span></span>
+              )}
+              {socketStatus === 'disconnected' && (
+                <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-zinc-500" /><span className="text-zinc-500">Disconnected</span></span>
+              )}
+              {socketStatus === 'failed' && (
+                <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-red-500" /><span className="text-red-500">Connection Failed</span></span>
+              )}
+              {isConnected && (
+                <><Separator orientation="vertical" className="h-3" /><span>{formatTime(callDuration)}</span></>
+              )}
               <Separator orientation="vertical" className="h-3" />
-              <span>{peers.length + 1} participants</span>
+              <span>{peers.length + 1} participant{peers.length !== 0 ? 's' : '}</span>
+              {/* Dev-only: show which hostname/IP is in use */}
+              {process.env.NODE_ENV !== 'production' && networkHost && (
+                <><Separator orientation="vertical" className="h-3" /><span className="font-mono text-[10px] opacity-60 hidden md:inline">{networkHost}</span></>
+              )}
             </div>
           </div>
         </div>
@@ -258,7 +293,10 @@ export default function SessionPage() {
               <div className="absolute inset-0 flex items-center justify-center z-20 bg-background/60 backdrop-blur-sm rounded-2xl">
                 <div className="text-center space-y-3">
                   <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-primary mx-auto" />
-                  <p className="text-sm text-muted-foreground">Joining session...</p>
+                  <p className="text-sm text-muted-foreground font-medium">Joining session...</p>
+                  <p className="text-xs text-muted-foreground/60">
+                    Connecting to {networkHost || 'server'}:3001
+                  </p>
                 </div>
               </div>
             )}
@@ -413,7 +451,13 @@ export default function SessionPage() {
           <div className="bg-card border border-destructive/30 rounded-2xl shadow-2xl max-w-md w-full">
             <div className="p-6 space-y-4 text-center">
               <div className="w-16 h-16 rounded-full bg-destructive/10 flex items-center justify-center mx-auto"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-destructive"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg></div>
-              <div><h3 className="text-lg font-semibold">Connection Error</h3><p className="text-sm text-muted-foreground mt-2">{error}</p></div>
+              <div>
+                <h3 className="text-lg font-semibold">Connection Error</h3>
+                <p className="text-sm text-muted-foreground mt-2">{error}</p>
+                {process.env.NODE_ENV !== 'production' && networkHost && (
+                  <p className="text-xs text-muted-foreground/60 mt-2 font-mono">Attempted: {networkHost}:3001</p>
+                )}
+              </div>
               <div className="flex gap-3 justify-center">
                 <Button variant="outline" onClick={() => { clearError(); connect(); }}>Retry</Button>
                 <Button variant="ghost" onClick={() => { clearError(); router.push(isAgent ? '/agent' : '/customer'); }}>Go Back</Button>

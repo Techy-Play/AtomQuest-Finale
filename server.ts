@@ -2,6 +2,7 @@
 // Runs on port 3001 alongside Next.js on port 3000
 
 import { createServer } from 'http';
+import { networkInterfaces } from 'os';
 import { Server as SocketIOServer } from 'socket.io';
 import * as mediasoup from 'mediasoup';
 import type {
@@ -14,6 +15,24 @@ import type {
 } from 'mediasoup/node/lib/types';
 
 const port = parseInt(process.env.SOCKET_PORT || '3001', 10);
+
+// Auto-detect LAN IP for mediasoup ICE candidate announcement.
+// When MEDIASOUP_ANNOUNCED_IP is not set, we find the first non-loopback
+// IPv4 address (e.g. 192.168.1.30) so mobile devices can reach us.
+function getLanIp(): string {
+  if (process.env.MEDIASOUP_ANNOUNCED_IP) return process.env.MEDIASOUP_ANNOUNCED_IP;
+  const nets = networkInterfaces();
+  for (const name of Object.keys(nets)) {
+    for (const net of nets[name] ?? []) {
+      if (net.family === 'IPv4' && !net.internal) {
+        return net.address; // e.g. 192.168.1.30
+      }
+    }
+  }
+  return '127.0.0.1'; // fallback
+}
+
+const LAN_IP = getLanIp();
 
 // mediasoup configuration
 const mediaCodecs: RtpCodecCapability[] = [
@@ -88,8 +107,9 @@ async function getOrCreateRoom(sessionId: string): Promise<Room> {
 async function createWebRtcTransport(router: Router): Promise<WebRtcTransport> {
   return router.createWebRtcTransport({
     listenInfos: [
-      { protocol: 'udp', ip: '0.0.0.0', announcedAddress: process.env.MEDIASOUP_ANNOUNCED_IP || '127.0.0.1' },
-      { protocol: 'tcp', ip: '0.0.0.0', announcedAddress: process.env.MEDIASOUP_ANNOUNCED_IP || '127.0.0.1' },
+      // Announce our LAN IP so mobile clients receive a reachable ICE candidate
+      { protocol: 'udp', ip: '0.0.0.0', announcedAddress: LAN_IP },
+      { protocol: 'tcp', ip: '0.0.0.0', announcedAddress: LAN_IP },
     ],
     enableUdp: true,
     enableTcp: true,
@@ -344,13 +364,15 @@ async function main() {
     });
   });
 
-  httpServer.listen(port, () => {
+  // Listen on all interfaces (0.0.0.0) so both laptop and mobile can connect
+  httpServer.listen(port, '0.0.0.0', () => {
     console.log(`
-    ╔══════════════════════════════════════════════╗
-    ║  🎥 mediasoup SFU + Socket.IO Server         ║
-    ║  📡 ws://localhost:${port}                      ║
-    ║  🔌 Server-routed media active               ║
-    ╚══════════════════════════════════════════════╝
+    ╔═══════════════════════════════════════════════════════╗
+    ║  🎥  mediasoup SFU + Socket.IO Server                 ║
+    ║  📡  Laptop : http://localhost:${port}                    ║
+    ║  📱  Mobile : http://${LAN_IP}:${port}               ║
+    ║  🔌  Server-routed media — announcedIP: ${LAN_IP}   ║
+    ╚═══════════════════════════════════════════════════════╝
     `);
   });
 }

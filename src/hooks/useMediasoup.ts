@@ -1,4 +1,4 @@
-'use client';
+ï»¿'use client';
 
 import { useRef, useCallback, useEffect, useState } from 'react';
 import { io, Socket } from 'socket.io-client';
@@ -153,8 +153,12 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
   // -- socket events ---------------------------------------------------------
 
   const registerSocketEvents = useCallback((socket: Socket) => {
-    socket.on('peer-joined', (peer: PeerInfo) => setPeers((p) => [...p.filter((x) => x.socketId !== peer.socketId), peer]));
+    socket.on('peer-joined', (peer: PeerInfo) => {
+      if (process.env.NODE_ENV !== 'production') console.log('[ConnectDesk] Peer joined:', peer.name, '| Role:', peer.role, '| Socket:', peer.socketId);
+      setPeers((p) => [...p.filter((x) => x.socketId !== peer.socketId), peer]);
+    });
     socket.on('peer-left', ({ socketId }: { socketId: string }) => {
+      if (process.env.NODE_ENV !== 'production') console.log('[ConnectDesk] Peer left, socket:', socketId);
       setPeers((p) => p.filter((x) => x.socketId !== socketId));
       setRemoteStreams((p) => { const m = new Map(p); m.delete(socketId); return m; });
     });
@@ -183,7 +187,7 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
   }, [consumeProducer]);
 
   // -------------------------------------------------------------------------
-  // TIER 1 — connect() — socket + room join, NO media permissions
+  // TIER 1 ï¿½ connect() ï¿½ socket + room join, NO media permissions
   // -------------------------------------------------------------------------
 
   const connect = useCallback(async () => {
@@ -191,8 +195,22 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
     setIsConnecting(true);
     setError(null);
     try {
-      const url = process.env.NEXT_PUBLIC_SOCKET_URL || `${window.location.protocol}//${window.location.hostname}:3001`;
-      const socket = io(url, { path: '/socket.io', transports: ['polling', 'websocket'], reconnection: false, timeout: 8000, forceNew: true });
+      // Dynamic URL: uses window.location.hostname so works for both
+      // localhost (laptop) and 192.168.x.x (mobile on same WiFi)
+      const socketHost = window.location.hostname;
+      const socketPort = 3001;
+      const url = process.env.NEXT_PUBLIC_SOCKET_URL || `${window.location.protocol}//${socketHost}:${socketPort}`;
+
+      if (process.env.NODE_ENV !== 'production') {
+        console.group('[ConnectDesk] Socket Connection');
+        console.log('Frontend hostname :', socketHost);
+        console.log('Socket URL        :', url);
+        console.log('Session ID        :', sessionIdRef.current);
+        console.log('User role         :', userRoleRef.current);
+        console.groupEnd();
+      }
+
+      const socket = io(url, { path: '/socket.io', transports: ['polling', 'websocket'], reconnection: false, timeout: 10000, forceNew: true });
       socketRef.current = socket;
 
       await new Promise<void>((resolve, reject) => {
@@ -223,6 +241,10 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
       registerSocketEvents(socket);
       setIsConnected(true);
       setSupportMode('chat');
+
+      if (process.env.NODE_ENV !== 'production') {
+        console.log('[ConnectDesk] Joined room:', sessionIdRef.current, '| Peers:', existingPeers.length);
+      }
     } catch (err: any) {
       console.error('Connect error:', err);
       setError(err.message || 'Failed to connect to session');
@@ -234,7 +256,7 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
   }, [emitAsync, createRecvTransport, consumeProducer, registerSocketEvents]);
 
   // -------------------------------------------------------------------------
-  // TIER 2 — startVoice() — microphone only
+  // TIER 2 ï¿½ startVoice() ï¿½ microphone only
   // -------------------------------------------------------------------------
 
   const startVoice = useCallback(async () => {
@@ -275,7 +297,7 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
   }, [createSendTransport]);
 
   // -------------------------------------------------------------------------
-  // TIER 3 — startVideo() — camera + mic
+  // TIER 3 ï¿½ startVideo() ï¿½ camera + mic
   // -------------------------------------------------------------------------
 
   const startVideo = useCallback(async () => {

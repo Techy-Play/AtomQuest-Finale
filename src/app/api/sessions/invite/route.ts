@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from 'next/server';
+﻿import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/prisma';
 import { getAuthUser } from '@/lib/auth';
 import { sendInviteEmail } from '@/lib/email';
@@ -40,7 +40,10 @@ export async function POST(req: NextRequest) {
       },
     });
 
-    const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+    // Derive the base URL from the incoming request so invite links work from any host (localhost or LAN IP)
+    const host = req.headers.get('host') || 'localhost:3000';
+    const proto = req.headers.get('x-forwarded-proto') || 'http';
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL || \://\System.Management.Automation.Internal.Host.InternalHost;
     const inviteUrl = `${appUrl}/join/${session.inviteToken}`;
 
     // Send email invite if customerEmail provided
