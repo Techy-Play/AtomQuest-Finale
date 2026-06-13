@@ -142,16 +142,30 @@ export default function SessionPage() {
     }
   };
 
-  // Attach local stream to video element and force play
-  useEffect(() => {
-    const videoEl = localVideoRef.current;
-    if (videoEl && localStream) {
-      videoEl.srcObject = localStream;
-      videoEl.play().catch(() => {
-        // Autoplay policy: will play when user interacts
-      });
+  // Helper: attach stream to video element — only acts if not already attached/playing
+  const attachStream = useCallback((el: HTMLVideoElement, stream: MediaStream) => {
+    if (el.srcObject !== stream) {
+      el.srcObject = stream;
     }
-  }, [localStream]);
+    if (el.paused) {
+      el.play().catch(() => {});
+    }
+  }, []);
+
+  // Attach local stream to video element — runs after joinedCall (when <video> element is in DOM)
+  useEffect(() => {
+    if (!joinedCall || !localStream) return;
+    const videoEl = localVideoRef.current;
+    if (videoEl) {
+      attachStream(videoEl, localStream);
+    } else {
+      // Retry after a paint if element not yet mounted
+      const t = setTimeout(() => {
+        if (localVideoRef.current) attachStream(localVideoRef.current, localStream);
+      }, 100);
+      return () => clearTimeout(t);
+    }
+  }, [localStream, joinedCall, attachStream]);
 
   // Call timer
   useEffect(() => {
@@ -278,30 +292,36 @@ export default function SessionPage() {
     router.push(user?.role === 'AGENT' || user?.role === 'ADMIN' ? '/agent' : '/customer');
   };
 
+
   // Set remote video ref — attach stream immediately when element mounts
   const setRemoteVideoRef = useCallback((peerId: string) => (el: HTMLVideoElement | null) => {
     if (el) {
       remoteVideoRefs.current.set(peerId, el);
       const remote = remoteStreams.get(peerId);
-      if (remote && el.srcObject !== remote.stream) {
-        el.srcObject = remote.stream;
-        el.play().catch(() => {});
+      if (remote) {
+        attachStream(el, remote.stream);
       }
     } else {
       remoteVideoRefs.current.delete(peerId);
     }
-  }, [remoteStreams]);
+  }, [remoteStreams, attachStream]);
 
   // Sync remote streams → video elements whenever remoteStreams changes
   useEffect(() => {
     remoteStreams.forEach((remote, peerId) => {
       const videoEl = remoteVideoRefs.current.get(peerId);
-      if (videoEl && videoEl.srcObject !== remote.stream) {
-        videoEl.srcObject = remote.stream;
-        videoEl.play().catch(() => {});
+      if (videoEl) {
+        attachStream(videoEl, remote.stream);
+      } else {
+        // Video element not mounted yet — retry once after React renders
+        const t = setTimeout(() => {
+          const el2 = remoteVideoRefs.current.get(peerId);
+          if (el2) attachStream(el2, remote.stream);
+        }, 150);
+        return () => clearTimeout(t);
       }
     });
-  }, [remoteStreams]);
+  }, [remoteStreams, attachStream]);
 
   if (loading) {
     return (

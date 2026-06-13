@@ -103,8 +103,14 @@ async function main() {
 
   const httpServer = createServer();
   const io = new SocketIOServer(httpServer, {
-    cors: { origin: '*', methods: ['GET', 'POST'] },
+    cors: {
+      origin: '*',
+      methods: ['GET', 'POST'],
+      credentials: false,
+    },
     path: '/socket.io',
+    transports: ['polling', 'websocket'],
+    allowEIO3: true,
   });
 
   io.on('connection', (socket) => {

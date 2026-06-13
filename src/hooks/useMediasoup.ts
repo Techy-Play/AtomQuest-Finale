@@ -11,6 +11,7 @@ interface PeerInfo {
   name: string;
   role: string;
   hasProducers?: boolean;
+  producers?: { id: string; kind: string }[];
 }
 
 interface RemoteStream {
@@ -232,20 +233,30 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
       setLocalStream(stream);
 
       // Connect socket to the mediasoup server
-      const socketUrl = process.env.NEXT_PUBLIC_SOCKET_URL || `${window.location.protocol}//${window.location.hostname}:3001`;
+      // Use the LAN IP dynamically so mobile devices on 192.168.1.x also work
+      const socketUrl = process.env.NEXT_PUBLIC_SOCKET_URL
+        || `${window.location.protocol}//${window.location.hostname}:3001`;
+
       const socket = io(socketUrl, {
         path: '/socket.io',
-        transports: ['websocket'],
-        reconnection: true,
-        reconnectionAttempts: 3,
-        timeout: 10000,
+        transports: ['polling', 'websocket'], // polling first — avoids raw WS error spam
+        reconnection: false,                  // manual retry from user — don't loop silently
+        timeout: 8000,
+        forceNew: true,
       });
       socketRef.current = socket;
 
       await new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error('Connection timeout — is the SFU server running?')), 10000);
+        const timeout = setTimeout(() => {
+          socket.disconnect();
+          reject(new Error('Could not reach the video server. Make sure the SFU server is running on port 3001 (run: npx ts-node server.ts).'));
+        }, 8000);
         socket.on('connect', () => { clearTimeout(timeout); resolve(); });
-        socket.on('connect_error', (err) => { clearTimeout(timeout); reject(err); });
+        socket.on('connect_error', (err) => {
+          clearTimeout(timeout);
+          socket.disconnect();
+          reject(new Error(`Video server unreachable: ${err.message}. Make sure the SFU server is running (port 3001).`));
+        });
       });
 
       // Join room
@@ -294,10 +305,10 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
       const existingPeers: PeerInfo[] = joinData.existingPeers || [];
       setPeers(existingPeers);
 
-      // Consume existing producers from peers
+      // Consume existing producers from peers already in the room
       for (const peer of existingPeers) {
-        if (peer.producers && (peer as any).producers.length > 0) {
-          for (const prod of (peer as any).producers) {
+        if (peer.producers && peer.producers.length > 0) {
+          for (const prod of peer.producers) {
             await consumeProducer(prod.id, peer.socketId);
             // Update peer name in remote streams
             setRemoteStreams((prev) => {

@@ -29,6 +29,7 @@ export default function RootLayout({
           defaultTheme="dark"
           enableSystem
           disableTransitionOnChange
+          enableColorScheme={false}
         >
           <AuthProvider>
             <TooltipProvider>
