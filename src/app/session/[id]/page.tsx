@@ -57,13 +57,7 @@ export default function SessionPage() {
     onSessionEnded: () => setCallEnded(true),
   });
 
-  // Auto-dismiss connection error after 6s
-  useEffect(() => {
-    if (error) {
-      const t = setTimeout(() => clearError(), 6000);
-      return () => clearTimeout(t);
-    }
-  }, [error, clearError]);
+  // Connection error is now manually dismissed via the popup button
 
   // File upload handler
   const handleFileUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -633,16 +627,29 @@ export default function SessionPage() {
         )}
       </div>
 
-      {/* Error overlay — auto-dismissed after 6s */}
+      {/* Error overlay — centered popup */}
       {error && (
-        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 p-4 rounded-xl bg-destructive/10 border border-destructive/20 text-destructive text-sm max-w-md flex items-start gap-3">
-          <div className="flex-1">
-            <p className="font-medium">Connection Error</p>
-            <p className="text-xs mt-1 opacity-80">{error}</p>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm p-4 animate-in fade-in zoom-in duration-200">
+          <div className="bg-card border border-destructive/30 rounded-2xl shadow-2xl shadow-destructive/10 max-w-md w-full overflow-hidden">
+            <div className="p-6 space-y-4 text-center">
+              <div className="w-16 h-16 rounded-full bg-destructive/10 flex items-center justify-center mx-auto mb-2">
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-destructive">
+                  <circle cx="12" cy="12" r="10"/>
+                  <line x1="15" y1="9" x2="9" y2="15"/>
+                  <line x1="9" y1="9" x2="15" y2="15"/>
+                </svg>
+              </div>
+              <div>
+                <h3 className="text-xl font-bold text-destructive mb-2">Connection Error</h3>
+                <p className="text-sm text-muted-foreground">{error}</p>
+              </div>
+            </div>
+            <div className="p-4 bg-muted/50 border-t border-border flex justify-center">
+              <Button variant="outline" onClick={clearError} className="w-full max-w-[200px]">
+                Dismiss
+              </Button>
+            </div>
           </div>
-          <button onClick={clearError} className="shrink-0 opacity-60 hover:opacity-100 mt-0.5">
-            <X size={16} />
-          </button>
         </div>
       )}
     </div>
