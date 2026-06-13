@@ -32,6 +32,9 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
   const audioProducerRef      = useRef<Producer | null>(null);
   const videoProducerRef      = useRef<Producer | null>(null);
   const consumersRef          = useRef<Map<string, Consumer>>(new Map());
+  // Tracks the active consumer ID per peer per kind: { [peerSocketId]: { audio?: consumerId, video?: consumerId } }
+  // Used to close the old consumer before opening a new one for the same kind (prevents echo from duplicate audio streams).
+  const peerConsumerKindRef   = useRef<Map<string, { audio?: string; video?: string }>>(new Map());
   const localStreamRef        = useRef<MediaStream | null>(null);
   const sendTransportSocketId = useRef<string | null>(null);
   // Lock to prevent concurrent startVoice/startVideo calls (React re-renders can cause duplicates)
@@ -88,12 +91,15 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
   // Must be called whenever the socket reconnects so we start fresh.
   const resetTransports = useCallback(() => {
     try { sendTransportRef.current?.close(); } catch {}
-    try { recvTransportRef.current?.close(); } catch {}
+    try { recvTransportRef.current?.close();  } catch {}
     sendTransportRef.current    = null;
     recvTransportRef.current    = null;
+    audioProducerRef.current    = null;
+    videoProducerRef.current    = null;
     sendTransportSocketId.current = null;
     consumersRef.current.forEach((c) => { try { c.close(); } catch {} });
     consumersRef.current.clear();
+    peerConsumerKindRef.current.clear();
   }, []);
 
   // Create a fresh send transport. Always associates it with the current socket ID.
@@ -172,18 +178,54 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
         sessionId: sessionIdRef.current, transportId: transport.id,
         producerId, rtpCapabilities: device.rtpCapabilities,
       });
-      console.log('[ConnectDesk] consumeProducer: got consumer data kind=', cd.kind, 'consumerId=', cd.id);
+      const kind = cd.kind as 'audio' | 'video';
+      console.log('[ConnectDesk] consumeProducer: got consumer data kind=', kind, 'consumerId=', cd.id);
+
+      // ── ECHO FIX: close any existing consumer of the same kind for this peer ──
+      // Without this, if startVideo is called twice or a peer re-produces, the OLD
+      // audio track stays in the MediaStream and plays alongside the new one → echo.
+      const peerKinds = peerConsumerKindRef.current.get(peerSocketId) || {};
+      const prevConsumerId = kind === 'audio' ? peerKinds.audio : peerKinds.video;
+      if (prevConsumerId && prevConsumerId !== cd.id) {
+        const prev = consumersRef.current.get(prevConsumerId);
+        if (prev) {
+          console.log('[ConnectDesk] consumeProducer: closing stale', kind, 'consumer', prevConsumerId);
+          try { prev.close(); } catch {}
+          consumersRef.current.delete(prevConsumerId);
+          // Remove the old track from the remote stream
+          setRemoteStreams((prev) => {
+            const m = new Map(prev);
+            const ex = m.get(peerSocketId);
+            if (ex && prev?.track) {
+              ex.stream.getAudioTracks().forEach((t) => { if (t !== prev.track) { ex.stream.removeTrack(t); t.stop(); } });
+            }
+            return m;
+          });
+        }
+      }
+      peerConsumerKindRef.current.set(peerSocketId, {
+        ...peerKinds,
+        [kind]: cd.id,
+      });
+      // ────────────────────────────────────────────────────────────────────────
+
       const consumer = await transport.consume({
-        id: cd.id, producerId: cd.producerId, kind: cd.kind, rtpParameters: cd.rtpParameters,
+        id: cd.id, producerId: cd.producerId, kind, rtpParameters: cd.rtpParameters,
       });
       consumersRef.current.set(consumer.id, consumer);
       await emitAsync('resume-consumer', { sessionId: sessionIdRef.current, consumerId: consumer.id });
       console.log('[ConnectDesk] consumeProducer: resumed consumer', consumer.id);
+
       setRemoteStreams((prev) => {
         const m = new Map(prev);
         const ex = m.get(peerSocketId);
         if (ex) {
-          if (!ex.stream.getTracks().map((tk) => tk.id).includes(consumer.track.id)) ex.stream.addTrack(consumer.track);
+          // Remove old tracks of the same kind before adding the new one
+          const oldTracks = kind === 'audio' ? ex.stream.getAudioTracks() : ex.stream.getVideoTracks();
+          oldTracks.forEach((t) => { if (t.id !== consumer.track.id) ex.stream.removeTrack(t); });
+          if (!ex.stream.getTracks().map((tk) => tk.id).includes(consumer.track.id)) {
+            ex.stream.addTrack(consumer.track);
+          }
           m.set(peerSocketId, { ...ex, peerName: peerName || ex.peerName, peerRole: peerRole || ex.peerRole });
         } else {
           m.set(peerSocketId, {
@@ -227,6 +269,15 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
       if (c) { try { c.close(); } catch {} consumersRef.current.delete(consumerId); }
     });
     socket.on('media-state-change', ({ socketId, kind, enabled }: { socketId: string; kind: string; enabled: boolean }) => {
+      // Actually mute/unmute the consumer track so the audio fully stops (not just a UI badge)
+      const peerKinds = peerConsumerKindRef.current.get(socketId);
+      if (peerKinds && kind === 'audio') {
+        const consumerId = peerKinds.audio;
+        if (consumerId) {
+          const c = consumersRef.current.get(consumerId);
+          if (c?.track) c.track.enabled = enabled;
+        }
+      }
       setRemoteStreams((prev) => {
         const m = new Map(prev);
         const r = m.get(socketId);
@@ -351,7 +402,28 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
     setMediaWarning(null);
     let stream: MediaStream;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true }, video: false });
+      stream = await navigator.mediaDevices.getUserMedia({
+        // Strong echo cancellation constraints for all browsers + mobile Chrome
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          // Mobile Chrome/Android extended constraints
+          // @ts-ignore
+          googEchoCancellation: true,
+          // @ts-ignore
+          googNoiseSuppression: true,
+          // @ts-ignore
+          googAutoGainControl: true,
+          // @ts-ignore
+          googHighpassFilter: true,
+          // @ts-ignore
+          googEchoCancellation2: true,
+          // @ts-ignore
+          googNoiseSuppression2: true,
+        },
+        video: false,
+      });
     } catch (err: any) {
       setMediaWarning(
         err.name === 'NotAllowedError'  ? 'Microphone permission denied.' :
@@ -399,8 +471,29 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
     let stream: MediaStream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true },
-        video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 }, facingMode: facing },
+        // Strong echo cancellation constraints for all browsers + mobile Chrome
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          // @ts-ignore
+          googEchoCancellation: true,
+          // @ts-ignore
+          googNoiseSuppression: true,
+          // @ts-ignore
+          googAutoGainControl: true,
+          // @ts-ignore
+          googHighpassFilter: true,
+          // @ts-ignore
+          googEchoCancellation2: true,
+          // @ts-ignore
+          googNoiseSuppression2: true,
+        },
+        video: {
+          width: { ideal: 1280 }, height: { ideal: 720 },
+          frameRate: { ideal: 30 },
+          facingMode: facing,
+        },
       });
     } catch (err: any) {
       setMediaWarning(

@@ -101,15 +101,19 @@ export default function SessionPage() {
     })();
   }, [loading, user, sessionId]);
 
-  const attachStream = useCallback((el: HTMLVideoElement, stream: MediaStream) => {
+  const attachStream = useCallback((el: HTMLVideoElement, stream: MediaStream, mute = false) => {
     if (el.srcObject !== stream) el.srcObject = stream;
+    // ECHO FIX: local self-view MUST be muted - enforce programmatically not just via attribute
+    if (mute) { el.muted = true; el.volume = 0; }
     if (el.paused) el.play().catch(() => {});
   }, []);
 
-  // Attach local stream - retry with timeouts since React may not have mounted video yet
+  // Attach local stream - always muted to prevent echo from local audio playback
   useEffect(() => {
     if (!localStream) return;
-    const tryAttach = () => { if (localVideoRef.current) attachStream(localVideoRef.current, localStream); };
+    const tryAttach = () => {
+      if (localVideoRef.current) attachStream(localVideoRef.current, localStream, true);
+    };
     tryAttach();
     const t1 = setTimeout(tryAttach, 150);
     const t2 = setTimeout(tryAttach, 500);
@@ -355,7 +359,9 @@ export default function SessionPage() {
               <div className="absolute inset-0 flex">
                 {remoteStreamEntries.map(([peerId, remote]) => (
                   <div key={peerId} className="relative flex-1 bg-black flex items-center justify-center">
+                    {/* disableRemotePlayback prevents Bluetooth/AirPlay routing loops that cause echo on mobile */}
                     <video ref={setRemoteVideoRef(peerId)} autoPlay playsInline
+                      disableRemotePlayback
                       className="w-full h-full object-contain" />
                     <div className="absolute bottom-3 left-3 flex items-center gap-1.5">
                       <span className="text-xs bg-black/70 backdrop-blur-sm text-white px-2 py-0.5 rounded-full font-medium">{remote.peerName}</span>
