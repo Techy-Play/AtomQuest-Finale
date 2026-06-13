@@ -10,6 +10,7 @@ import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { ThemeToggle } from '@/components/theme-toggle';
+import { Paperclip, X } from 'lucide-react';
 
 export default function SessionPage() {
   const router = useRouter();
@@ -23,6 +24,9 @@ export default function SessionPage() {
   const [joinedCall, setJoinedCall] = useState(false);
   const [joiningCall, setJoiningCall] = useState(false);
   const [callDuration, setCallDuration] = useState(0);
+  const [uploadingFile, setUploadingFile] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -44,6 +48,7 @@ export default function SessionPage() {
     endSession,
     peers,
     error,
+    clearError,
   } = useMediasoup({
     sessionId,
     userId: user?.userId || '',
@@ -51,6 +56,37 @@ export default function SessionPage() {
     userRole: user?.role || '',
     onSessionEnded: () => setCallEnded(true),
   });
+
+  // Auto-dismiss connection error after 6s
+  useEffect(() => {
+    if (error) {
+      const t = setTimeout(() => clearError(), 6000);
+      return () => clearTimeout(t);
+    }
+  }, [error, clearError]);
+
+  // File upload handler
+  const handleFileUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    // Reset input so same file can be re-selected
+    e.target.value = '';
+    setUploadError(null);
+    setUploadingFile(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const res = await fetch('/api/upload', { method: 'POST', body: formData });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Upload failed');
+      await sendMessage(file.name, 'FILE', data.url, file.name, file.size);
+    } catch (err: any) {
+      setUploadError(err.message || 'Upload failed');
+      setTimeout(() => setUploadError(null), 5000);
+    } finally {
+      setUploadingFile(false);
+    }
+  }, [sendMessage]);
 
   // Fetch session info
   useEffect(() => {
@@ -475,7 +511,7 @@ export default function SessionPage() {
 
         {/* Chat sidebar */}
         {chatOpen && (
-          <div className="w-80 border-l border-border flex flex-col shrink-0 animate-slide-in">
+          <div className="w-80 border-l border-border flex flex-col shrink-0">
             <div className="p-3 border-b border-border flex items-center justify-between">
               <h3 className="font-medium text-sm">Chat</h3>
               <Badge variant="secondary" className="text-xs">{chatMessages.length}</Badge>
@@ -490,11 +526,10 @@ export default function SessionPage() {
                 ) : (
                   chatMessages.map((msg) => {
                     const isMe = msg.senderId === user?.userId;
+                    const isImage = msg.fileUrl && /\.(jpe?g|png|gif|webp)$/i.test(msg.fileUrl);
+                    const isPdf = msg.fileUrl && msg.fileUrl.includes('.pdf');
                     return (
-                      <div
-                        key={msg.id}
-                        className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}
-                      >
+                      <div key={msg.id} className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
                         <div className="flex items-center gap-1.5 mb-0.5">
                           <span className="text-[10px] font-medium text-muted-foreground">
                             {isMe ? 'You' : msg.senderName}
@@ -505,19 +540,34 @@ export default function SessionPage() {
                             {msg.senderRole}
                           </Badge>
                         </div>
-                        <div
-                          className={`rounded-xl px-3 py-2 text-sm max-w-[85%] ${
-                            isMe
-                              ? 'bg-primary text-primary-foreground rounded-br-sm'
-                              : 'glass rounded-bl-sm'
-                          }`}
-                        >
+                        <div className={`rounded-xl text-sm max-w-[85%] overflow-hidden ${
+                          isMe ? 'bg-primary text-primary-foreground rounded-br-sm' : 'glass rounded-bl-sm'
+                        }`}>
                           {msg.type === 'FILE' && msg.fileUrl ? (
-                            <a href={msg.fileUrl} target="_blank" rel="noopener noreferrer" className="underline">
-                              📎 {msg.fileName || 'File'}
-                            </a>
+                            isImage ? (
+                              <a href={msg.fileUrl} target="_blank" rel="noopener noreferrer">
+                                <img
+                                  src={msg.fileUrl}
+                                  alt={msg.fileName || 'Image'}
+                                  className="max-w-full rounded-xl object-cover max-h-48"
+                                  onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                                />
+                              </a>
+                            ) : (
+                              <a
+                                href={msg.fileUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className={`flex items-center gap-2 px-3 py-2 underline ${
+                                  isMe ? 'text-primary-foreground' : 'text-foreground'
+                                }`}
+                              >
+                                <span>{isPdf ? '📄' : '📎'}</span>
+                                <span className="truncate max-w-[160px] text-xs">{msg.fileName || 'File'}</span>
+                              </a>
+                            )
                           ) : (
-                            msg.content
+                            <div className="px-3 py-2">{msg.content}</div>
                           )}
                         </div>
                         <span className="text-[9px] text-muted-foreground mt-0.5">
@@ -531,8 +581,39 @@ export default function SessionPage() {
               </div>
             </ScrollArea>
 
-            <div className="p-3 border-t border-border">
+            {/* Upload error */}
+            {uploadError && (
+              <div className="mx-3 mb-1 p-2 rounded-lg bg-destructive/10 border border-destructive/20 text-destructive text-xs flex items-center justify-between">
+                <span>{uploadError}</span>
+                <button onClick={() => setUploadError(null)}><X size={12} /></button>
+              </div>
+            )}
+
+            <div className="p-3 border-t border-border space-y-2">
+              {/* File upload input (hidden) */}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*,.pdf"
+                className="hidden"
+                onChange={handleFileUpload}
+              />
               <div className="flex gap-2">
+                {/* Attach file button */}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="px-2 shrink-0"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={uploadingFile}
+                  title="Attach image or PDF"
+                >
+                  {uploadingFile ? (
+                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-current" />
+                  ) : (
+                    <Paperclip size={16} />
+                  )}
+                </Button>
                 <Input
                   placeholder="Type a message..."
                   value={messageInput}
@@ -540,7 +621,7 @@ export default function SessionPage() {
                   onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
                   className="text-sm"
                 />
-                <Button size="sm" onClick={handleSendMessage} disabled={!messageInput.trim()}>
+                <Button size="sm" onClick={handleSendMessage} disabled={!messageInput.trim()} className="shrink-0">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <line x1="22" y1="2" x2="11" y2="13"/>
                     <polygon points="22 2 15 22 11 13 2 9 22 2"/>
@@ -552,11 +633,16 @@ export default function SessionPage() {
         )}
       </div>
 
-      {/* Error overlay */}
+      {/* Error overlay — auto-dismissed after 6s */}
       {error && (
-        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 p-4 rounded-xl bg-destructive/10 border border-destructive/20 text-destructive text-sm max-w-md">
-          <p className="font-medium">Connection Error</p>
-          <p className="text-xs mt-1">{error}</p>
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 p-4 rounded-xl bg-destructive/10 border border-destructive/20 text-destructive text-sm max-w-md flex items-start gap-3">
+          <div className="flex-1">
+            <p className="font-medium">Connection Error</p>
+            <p className="text-xs mt-1 opacity-80">{error}</p>
+          </div>
+          <button onClick={clearError} className="shrink-0 opacity-60 hover:opacity-100 mt-0.5">
+            <X size={16} />
+          </button>
         </div>
       )}
     </div>
