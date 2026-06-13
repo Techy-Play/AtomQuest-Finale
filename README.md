@@ -1,413 +1,295 @@
-﻿# ConnectDesk — Real-Time Video Support Platform
+# ConnectDesk — Real-Time Video Support Platform
 
-**AtomQuest Hackathon 1.0 — Grand Finale Submission**
+> A full-stack customer support platform with live chat, voice calls, and HD video sessions — built for the **AtomQuest Hackathon**.
 
-A full-featured, enterprise-grade customer support platform with a tiered escalation model (Chat → Voice → Video), server-routed WebRTC media via mediasoup SFU, real-time chat, file sharing, automated call recording, and full LAN/mobile support for laptop + phone demonstrations.
-
----
-
-## Quick Start
-
-```bash
-# 1. Install dependencies
-npm install
-
-# 2. Set up database
-npx prisma db push
-
-# 3. Start both servers (Next.js + SFU)
-npm run dev:all
-```
-
-**Laptop (Agent):** http://localhost:3000
-**Mobile (Customer):** http://192.168.x.x:3000 *(your machine's LAN IP, shown in the SFU startup log)*
+![ConnectDesk Banner](https://img.shields.io/badge/ConnectDesk-Video%20Support-6366f1?style=for-the-badge&logo=webrtc)
+![Next.js](https://img.shields.io/badge/Next.js-16-black?style=flat-square&logo=next.js)
+![mediasoup](https://img.shields.io/badge/mediasoup-SFU-ff6b35?style=flat-square)
+![Prisma](https://img.shields.io/badge/Prisma-ORM-2D3748?style=flat-square&logo=prisma)
+![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?style=flat-square&logo=typescript)
 
 ---
 
-## Tiered Support Architecture
+## 📋 Table of Contents
 
-Sessions follow a **customer-support-first** escalation model — joining never requires camera or microphone access.
+- [Overview](#-overview)
+- [Features](#-features)
+- [Architecture](#-architecture)
+- [Tech Stack](#-tech-stack)
+- [Prerequisites](#-prerequisites)
+- [Setup & Installation](#-setup--installation)
+- [Environment Variables](#-environment-variables)
+- [Running Locally](#-running-locally)
+- [Mobile / LAN Access](#-mobile--lan-access)
+- [Usage Guide](#-usage-guide)
+- [Project Structure](#-project-structure)
+
+---
+
+## 🚀 Overview
+
+ConnectDesk is a **customer support platform** that mirrors real enterprise systems like Intercom and Zendesk. An agent creates a support session and invites a customer via a unique link. The session escalates from chat → voice → video as needed. All media is routed through a **mediasoup SFU** (Selective Forwarding Unit) for low-latency, server-side WebRTC.
+
+---
+
+## ✨ Features
+
+### 👤 Agent
+- Dashboard to **create, manage and monitor** support sessions
+- Invite customers via **email** or **shareable link**
+- Escalate sessions: **Chat → Voice → Video** (agent-initiated)
+- **Mute / unmute** audio and toggle camera at any time
+- **Manual recording** — start/stop recording at any time; stored to cloud (Cloudinary)
+- Deep-link **session history** page with tabs for Chat, Files, Recordings, and Event Log
+
+### 👥 Customer
+- Join via invite link — no account required (guest join)
+- **Real-time chat** with file & image sharing
+- Accept/decline incoming voice and video calls
+- **Camera switch** (front ↔ back) on mobile
+- Mute audio or turn off camera independently
+
+### 🎥 Media Engine
+- **mediasoup SFU** — server-routed WebRTC (no P2P, works behind NAT/firewalls)
+- Automatic **SFU reconnect** with retry logic (up to 8 attempts, 3s apart)
+- **Echo cancellation** — `echoCancellation`, `noiseSuppression`, `autoGainControl` + Chrome mobile extended constraints
+- Stale consumer cleanup per-peer to prevent audio doubling
+- `object-contain` video layout — portrait mobile cameras are never cropped
+
+### 📜 Session History
+- Chat history retrievable after session ends
+- Shared files browsable with image preview
+- Recordings stored to Cloudinary, downloadable from the history page
+- Full event log (joined, started, ended, escalated)
+
+---
+
+## 🏗️ Architecture
 
 ```
-Level 1 ─ Chat Support     (default on join, no media needed)
+Browser (Next.js 16)
     │
-    ▼  click "Start Voice Support"
-Level 2 ─ Voice Support    (mic permission requested on demand)
+    ├─── REST API (Next.js App Router /api/*)
+    │       ├── /api/sessions       — CRUD sessions
+    │       ├── /api/sessions/invite — create + email invite
+    │       ├── /api/sessions/join  — guest join via token
+    │       ├── /api/recordings     — save/list recordings
+    │       └── /api/upload         — Cloudinary file upload
     │
-    ▼  Agent: "Request Customer Camera"  OR  Customer: "Enable My Camera"
-Level 3 ─ Video Support    (cam + mic, customer approves agent request)
-```
-
-Key principles:
-- **Joining is always instant** — no permission prompt on page load
-- **Media errors are non-blocking** — a dismissable warning shows, session continues
-- **Customers always decide** — agent can request, never force, video
-
----
-
-## Features
-
-### Session Management
-- Agent creates a session and sends a shareable invite link via email
-- Customer joins via invite link — no account required
-- Real-time participant list tracking
-- Session history persisted to PostgreSQL via Prisma
-- Agent-only session termination; customers can leave without ending the session
-- Live session duration timer
-
-### Chat Support — Level 1 (Always Available)
-- Real-time messaging via Socket.IO relay
-- Inline image display (JPEG, PNG, GIF, WebP)
-- PDF sharing — opens in Google Drive viewer
-- File attach button (images + PDFs)
-- Message history loaded on join from database
-- Works with zero camera/mic permission
-
-### Voice Support — Level 2 (On-Demand)
-- "Start Voice Support" button triggers mic permission
-- If denied: non-blocking amber warning, session stays in chat mode
-- Audio published through mediasoup SFU (server-routed, no P2P)
-- Mute/unmute toggle during call
-
-### Video Support — Level 3 (Escalated)
-- **Agent-initiated:** "Request Customer Camera" → dialog appears on customer's screen
-- **Customer self-serve:** "Enable My Camera" button
-- Customer dialog: Allow / Decline — declining never disconnects the session
-- Camera + mic captured together via `getUserMedia`
-- Video published through mediasoup SFU (server-routed, no P2P)
-
-### Call Recording (Agent-Visible Only)
-- Starts automatically when the customer's video stream is active
-- Records **customer stream only** — agent is never recorded
-- Uploaded to Cloudinary after session ends
-- Download link shown in the agent's recording status bar
-- Status: `Recording` → `Processing` → `Ready` / `Failed`
-- Completely hidden from the customer side
-
-### LAN / Mobile Support
-- Socket.IO server listens on `0.0.0.0` — reachable from any device on the network
-- mediasoup auto-detects the machine's LAN IP for ICE candidate announcements — no manual config needed
-- Next.js runs on `-H 0.0.0.0` — accessible from mobile browsers
-- All socket URLs derived dynamically from `window.location.hostname` — no hardcoded `localhost`
-- Invite links generated from the request `Host` header — work correctly on LAN
-
-### Connection Status UI
-- 4-state socket indicator in the session header: `Connecting` / `Connected` / `Disconnected` / `Failed`
-- Dev mode: active hostname displayed in header (e.g. `192.168.1.30`)
-- Connecting overlay shows which server is being contacted
-- Error dialog shows the attempted socket URL for easy debugging
-
-### Dev Logging (Browser Console)
-In development, the console prints:
-```
-[ConnectDesk] Socket Connection
-  Frontend hostname : 192.168.1.30
-  Socket URL        : http://192.168.1.30:3001
-  Session ID        : cma...
-  User role         : CUSTOMER
-[ConnectDesk] Joined room: cma... | Peers: 1
-[ConnectDesk] Peer joined: Support Agent | Role: AGENT
+    └─── Socket.IO + mediasoup SFU (server.ts on :3001)
+            ├── join-room           — load mediasoup Device
+            ├── create-transport    — WebRTC transport setup
+            ├── produce             — publish local audio/video
+            ├── consume             — subscribe to remote stream
+            └── resume-consumer     — unpause consumer after ICE
 ```
 
 ---
 
-## Architecture
-
-```
-┌──────────────────────────────────────────────────────────┐
-│                   CLIENT (Browser)                       │
-│  Next.js 15 + React 19 + TypeScript                      │
-│  Tailwind CSS v4 · shadcn/ui · next-themes               │
-│  mediasoup-client · Socket.IO-client                     │
-│                                                          │
-│  URL detection: window.location.hostname                 │
-│  → works on localhost AND 192.168.x.x automatically     │
-└──────────┬───────────────────────────┬───────────────────┘
-           │ HTTP/REST                 │ WebSocket
-           ▼                           ▼
-┌──────────────────────┐  ┌───────────────────────────────┐
-│  Next.js API Routes  │  │  mediasoup SFU Server         │
-│  (port 3000)         │  │  (port 3001, 0.0.0.0)         │
-│                      │  │                               │
-│  /api/sessions       │  │  Listens: 0.0.0.0:3001        │
-│  /api/auth           │  │  ICE addr: auto-detected LAN  │
-│  /api/upload         │  │  Transports: polling+ws       │
-│  /api/recordings     │  │                               │
-│  /api/history        │  │  Events:                      │
-└──────────┬───────────┘  │  join-room, produce, consume  │
-           │              │  chat-message, media-state    │
-    ┌──────┴──────┐       │  request-customer-video       │
-    │ PostgreSQL  │       │  video-request-response       │
-    │  (Prisma)   │       └───────────────────────────────┘
-    │             │
-    │ Sessions    │
-    │ Messages    │
-    │ Recordings  │
-    │ Users       │
-    └─────────────┘
-```
-
----
-
-## Tech Stack
+## 🛠 Tech Stack
 
 | Layer | Technology |
 |---|---|
-| Frontend | Next.js 15 (Turbopack), React 19, TypeScript |
-| Styling | Tailwind CSS v4, shadcn/ui, next-themes |
-| WebRTC SFU | mediasoup v3 — server-routed, no peer-to-peer |
-| Real-time | Socket.IO (polling + websocket fallback) |
-| Database | PostgreSQL + Prisma ORM (hosted on Neon) |
-| File Storage | Cloudinary (images, PDFs, session recordings) |
-| Auth | JWT — cookie-based, server-validated |
-| Dev tooling | Concurrently, tsx, ESLint |
+| **Frontend** | Next.js 16 (App Router), TypeScript, Tailwind CSS, shadcn/ui |
+| **WebRTC SFU** | mediasoup v3 + Socket.IO v4 |
+| **Database** | PostgreSQL + Prisma ORM |
+| **Auth** | JWT (HttpOnly cookie) |
+| **File Storage** | Cloudinary |
+| **Email** | Nodemailer (SMTP) |
+| **Dev runner** | concurrently (`npm run dev:all`) |
 
 ---
 
-## Prerequisites
+## 📦 Prerequisites
 
-| Requirement | Notes |
-|---|---|
-| Node.js 18+ | Required for mediasoup |
-| PostgreSQL | Neon serverless works out of the box |
-| Cloudinary account | Free tier is sufficient for demo |
-| Gmail App Password | For email invite links |
+- **Node.js** ≥ 18  
+- **npm** ≥ 9  
+- **PostgreSQL** (local or hosted — e.g. Neon, Supabase)  
+- **Cloudinary** account (free tier works)  
+- **SMTP** credentials (Gmail App Password works)  
+- Windows users: Python + Visual C++ Build Tools (for mediasoup native build)
 
----
+### Install Windows Build Tools (first time only)
 
-## Environment Variables
-
-Create a `.env` file in the project root:
-
-```env
-# Database
-DATABASE_URL="postgresql://user:password@host/db?sslmode=require"
-
-# Auth
-JWT_SECRET="your-secret-here"
-
-# Cloudinary (file uploads + recording storage)
-CLOUDINARY_CLOUD_NAME="your-cloud-name"
-CLOUDINARY_API_KEY="your-api-key"
-CLOUDINARY_API_SECRET="your-api-secret"
-
-# Email (Gmail App Password)
-EMAIL_HOST="smtp.gmail.com"
-EMAIL_PORT="587"
-EMAIL_USER="you@gmail.com"
-EMAIL_PASS="xxxx xxxx xxxx xxxx"
-
-# --- OPTIONAL OVERRIDES ---
-# Leave these commented out for automatic LAN detection.
-# Set them only when deploying to a fixed domain.
-# NEXT_PUBLIC_APP_URL="https://your-domain.com"
-# NEXT_PUBLIC_SOCKET_URL="https://your-domain.com"
-
-# Set this only if LAN IP auto-detection picks the wrong interface.
-# MEDIASOUP_ANNOUNCED_IP="192.168.1.30"
+```powershell
+# Run PowerShell as Administrator
+npm install --global windows-build-tools
+# OR install manually:
+# https://visualstudio.microsoft.com/visual-cpp-build-tools/
 ```
 
-> **Important:** `NEXT_PUBLIC_APP_URL` and `NEXT_PUBLIC_SOCKET_URL` are intentionally left unset. The app derives both from `window.location.hostname` at runtime, making it work on `localhost` *and* any LAN IP without code changes.
-
 ---
 
-## Setup
+## ⚙️ Setup & Installation
+
+### 1. Clone the repository
 
 ```bash
-# Clone
-git clone <repo-url>
-cd video-support-platform
+git clone https://github.com/Techy-Play/AtomQuest-Finale.git
+cd AtomQuest-Finale/video-support-platform
+```
 
-# Install
+### 2. Install dependencies
+
+```bash
 npm install
+```
 
-# Generate Prisma client
-npx prisma generate
+### 3. Configure environment variables
 
-# Push schema to database
+Copy the example env file and fill in your values:
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` — see [Environment Variables](#-environment-variables) below.
+
+### 4. Set up the database
+
+```bash
+# Push schema to your PostgreSQL database
 npx prisma db push
 
-# (Optional) Seed initial agent account
-npm run seed
+# (Optional) seed an admin/agent account
+npx prisma db seed
+```
+
+### 5. Open firewall ports (Windows — for mobile access on same WiFi)
+
+```powershell
+# Run as Administrator
+.\open-firewall-ports.ps1
+```
+
+This opens TCP 3001 and UDP 10000–10100 for the mediasoup SFU.
+
+---
+
+## 🔑 Environment Variables
+
+Create a `.env` file in `video-support-platform/`:
+
+```env
+# ── Database ──────────────────────────────────────────────
+DATABASE_URL="postgresql://user:password@localhost:5432/connectdesk"
+
+# ── Auth ──────────────────────────────────────────────────
+JWT_SECRET="your-super-secret-jwt-key-change-this"
+
+# ── Cloudinary (file + recording storage) ─────────────────
+CLOUDINARY_CLOUD_NAME="your_cloud_name"
+CLOUDINARY_API_KEY="your_api_key"
+CLOUDINARY_API_SECRET="your_api_secret"
+
+# ── Email (SMTP) ───────────────────────────────────────────
+SMTP_HOST="smtp.gmail.com"
+SMTP_PORT="587"
+SMTP_USER="your@gmail.com"
+SMTP_PASS="your_app_password"         # Gmail → Settings → App Passwords
+
+# ── SFU Networking ────────────────────────────────────────
+# Set this to your LAN IP so mobile devices can reach the SFU
+# Find it with: ipconfig (Windows) or ip addr (Linux)
+MEDIASOUP_ANNOUNCED_IP="192.168.1.X"  # Your laptop's WiFi IP
+
+# ── App URL (optional) ────────────────────────────────────
+# Only needed if deploying to a custom domain
+# NEXT_PUBLIC_APP_URL="https://your-domain.com"
 ```
 
 ---
 
-## Running
+## ▶️ Running Locally
 
-### Combined (recommended)
 ```bash
+# Starts both Next.js (port 3000) and mediasoup SFU (port 3001) together
 npm run dev:all
 ```
-Starts both Next.js and the mediasoup SFU server concurrently with color-coded output.
 
-### Split terminals
-```bash
-# Terminal 1 — Next.js frontend
-npm run dev
+Then open:
+- **Agent dashboard**: http://localhost:3000
+- **Customer join**: http://localhost:3000/join/[token]
 
-# Terminal 2 — mediasoup SFU server
-npm run dev:server
-```
-
-### Startup output
-When both servers are running you will see:
-```
-╔═══════════════════════════════════════════════════════╗
-║  🎥  mediasoup SFU + Socket.IO Server                 ║
-║  📡  Laptop : http://localhost:3001                   ║
-║  📱  Mobile : http://192.168.1.30:3001               ║
-║  🔌  Server-routed media — announcedIP: 192.168.1.30 ║
-╚═══════════════════════════════════════════════════════╝
-```
-The LAN IP is auto-detected — no manual configuration needed.
+> **Note:** The SFU takes ~5 seconds to start after Next.js. The session page will show **"Connecting…"** and automatically retry — no manual refresh needed.
 
 ---
 
-## Laptop + Mobile Demo Setup
+## 📱 Mobile / LAN Access
 
-This is the primary testing configuration:
+To test with a real mobile device on the same WiFi:
 
-```
-Agent  → Laptop  → Chrome → http://localhost:3000
-Customer → Phone → Safari/Chrome → http://192.168.1.30:3000
-```
+1. Find your laptop's LAN IP:
+   ```powershell
+   ipconfig
+   # Look for: IPv4 Address . . . : 192.168.1.X
+   ```
 
-Both devices must be on the **same Wi-Fi network**.
+2. Set it in `.env`:
+   ```env
+   MEDIASOUP_ANNOUNCED_IP=192.168.1.X
+   ```
 
-**Step-by-step:**
+3. Run the firewall script (**as Administrator**):
+   ```powershell
+   .\open-firewall-ports.ps1
+   ```
 
-1. Run `npm run dev:all` on the laptop
-2. Note the LAN IP shown in the SFU startup log (e.g. `192.168.1.30`)
-3. On the laptop, open `http://localhost:3000` → log in as Agent
-4. Create a new session → copy the invite link
-5. On the phone, open the invite link (it will use the LAN IP automatically)
-6. Customer joins → both are now in the session
-
-**What works from mobile:**
-- ✅ Socket.IO connects to the correct server
-- ✅ Chat messages send and receive in real time
-- ✅ File/image/PDF sharing
-- ✅ Presence updates (participant list)
-- ✅ Voice support (mic on mobile)
-- ✅ Video support (camera on mobile, after agent requests)
+4. On mobile, open: `http://192.168.1.X:3000`
 
 ---
 
-## User Roles
+## 🧭 Usage Guide
 
-| Role | Can Do |
-|---|---|
-| **AGENT** | Create sessions, send email invites, end sessions, request customer camera, view recording status + download |
-| **CUSTOMER** | Join via invite link (no account needed), chat, start voice/video, approve or decline video requests |
-| **ADMIN** | Same as AGENT plus admin dashboard |
+### As an Agent
+
+1. Go to `http://localhost:3000` → **Login** (create account if first time)
+2. Click **New Session** → enter a title
+3. Choose to invite by **email** or copy the **invite link**
+4. Click **Join Call** to enter the session
+5. Chat with the customer. Escalate when needed:
+   - Click **Start Voice Support** to begin a voice call
+   - Click **Request Customer Camera** to ask for video
+6. Use the **recording bar** at the bottom to **Start / Stop Recording**
+7. After the session, go to **History** → view chat, files, and recordings
+
+### As a Customer
+
+1. Open the invite link (e.g. `http://192.168.1.X:3000/join/TOKEN`)
+2. Enter your name → **Join Session**
+3. Chat with the agent
+4. When prompted for voice/video, accept or decline
+5. Use the **mute** and **camera** buttons in the controls bar
+6. On mobile, tap **Switch Camera** (🔄) to toggle front/back camera
 
 ---
 
-## Session Flow
+## 📁 Project Structure
 
 ```
-Agent (Laptop)                        Customer (Mobile)
-      │                                      │
-      │── Create session ────────────────────┤
-      │── Send invite email ─────────────────┤
-      │                                      │── Open invite link
-      │                                      │── Auto-join (no media prompt)
-      │── Auto-join (no media prompt) ───────┤
-      │                                      │
-      │◄════════ Chat Support (default) ════►│
-      │                                      │
-      │── "Start Voice Support" ─────────────┤  (or customer does the same)
-      │◄════════ Voice Support ══════════════►│
-      │                                      │
-      │── "Request Customer Camera" ─────────►│ ← Dialog: Allow / Decline
-      │                                      │── Allow → cam+mic captured
-      │◄════════ Video Support ══════════════►│
-      │                                      │
-      │── Recording starts (customer only) ──┤
-      │                                      │
-      │── "End Session" ─────────────────────►│ ← both redirected
-      │── Recording uploaded to Cloudinary ──┤
-      │── Download link shown to agent ──────┤
+video-support-platform/
+├── src/
+│   ├── app/
+│   │   ├── agent/          # Agent dashboard
+│   │   ├── customer/       # Customer dashboard
+│   │   ├── session/[id]/   # Live session page (chat + video)
+│   │   ├── history/[id]/   # Session history (chat, files, recordings)
+│   │   ├── join/           # Customer invite join flow
+│   │   └── api/            # REST API routes
+│   ├── hooks/
+│   │   └── useMediasoup.ts # WebRTC media hook (produce/consume)
+│   ├── components/         # UI components (shadcn/ui based)
+│   ├── contexts/           # AuthContext
+│   └── lib/                # Prisma client, auth helpers
+├── server.ts               # mediasoup SFU + Socket.IO server (port 3001)
+├── prisma/
+│   └── schema.prisma       # Database schema
+├── open-firewall-ports.ps1 # Windows firewall setup script
+└── .env                    # Environment config (not committed)
 ```
 
 ---
 
-## API Reference
+## 📄 License
 
-| Method | Endpoint | Auth | Description |
-|---|---|---|---|
-| POST | `/api/auth/register` | None | Register new user |
-| POST | `/api/auth/login` | None | Login, sets JWT cookie |
-| POST | `/api/auth/logout` | None | Clear cookie |
-| GET | `/api/auth/me` | Required | Get current user |
-| GET | `/api/sessions` | Agent | List agent's sessions |
-| POST | `/api/sessions/invite` | Agent | Create session + send email |
-| POST | `/api/sessions/join` | None | Join via invite token |
-| GET | `/api/sessions/:id` | Required | Get session with messages |
-| PATCH | `/api/sessions/:id` | Agent | Update session status |
-| POST | `/api/sessions/:id/messages` | Required | Persist chat message |
-| POST | `/api/upload` | Required | Upload file to Cloudinary |
-| POST | `/api/recordings/:id` | Agent | Save recording metadata/URL |
-| GET | `/api/history` | Required | Session history |
-
----
-
-## Socket.IO Events
-
-| Direction | Event | Payload | Description |
-|---|---|---|---|
-| Client → Server | `join-room` | `{sessionId, userId, name, role}` | Join session room |
-| Client → Server | `create-transport` | `{sessionId, direction}` | Create WebRTC transport |
-| Client → Server | `connect-transport` | `{sessionId, transportId, dtlsParameters}` | Connect transport |
-| Client → Server | `produce` | `{sessionId, transportId, kind, rtpParameters}` | Publish media track |
-| Client → Server | `consume` | `{sessionId, transportId, producerId, rtpCapabilities}` | Subscribe to track |
-| Client → Server | `resume-consumer` | `{sessionId, consumerId}` | Resume paused consumer |
-| Client → Server | `chat-message` | `{sessionId, message}` | Send chat message |
-| Client → Server | `media-state-change` | `{sessionId, kind, enabled}` | Toggle mute/video |
-| Client → Server | `request-customer-video` | `{sessionId}` | Agent requests customer cam |
-| Client → Server | `video-request-response` | `{sessionId, accepted}` | Customer responds |
-| Client → Server | `end-session` | `{sessionId}` | End session for all |
-| Server → Client | `peer-joined` | `{socketId, userId, name, role}` | New participant |
-| Server → Client | `peer-left` | `{socketId}` | Participant disconnected |
-| Server → Client | `new-producer` | `{producerId, socketId}` | New media track available |
-| Server → Client | `chat-message` | `ChatMsg` | Relayed message |
-| Server → Client | `media-state-change` | `{socketId, kind, enabled}` | Peer mute state |
-| Server → Client | `video-request` | — | Customer: agent requested cam |
-| Server → Client | `video-request-accepted` | — | Agent: customer approved |
-| Server → Client | `video-request-declined` | — | Agent: customer declined |
-| Server → Client | `session-ended` | — | Session terminated |
-
----
-
-## Feature Checklist
-
-- [x] Session creation with shareable invite links
-- [x] Guest join — customer joins without an account
-- [x] Real-time participant list
-- [x] Agent-only session termination
-- [x] Session history with duration tracking
-- [x] Real-time chat (Socket.IO)
-- [x] Inline image display (JPEG, PNG, GIF, WebP)
-- [x] PDF sharing via Google Drive viewer
-- [x] File upload via Cloudinary
-- [x] Chat-first join (no media prompt on page load)
-- [x] Voice escalation — mic requested on demand
-- [x] Agent-initiated video request with customer approval dialog
-- [x] Customer self-serve video escalation
-- [x] Non-blocking media errors — session never interrupted
-- [x] Server-routed audio via mediasoup SFU (no P2P)
-- [x] Server-routed video via mediasoup SFU (no P2P)
-- [x] Mute/unmute audio control
-- [x] Camera on/off control
-- [x] Stop media — return to chat mode without leaving session
-- [x] Auto recording of customer stream (agent-visible only)
-- [x] Recording upload to Cloudinary post-session
-- [x] Recording download link for agent
-- [x] Dark / Light theme toggle
-- [x] LAN support — mobile + laptop on same Wi-Fi
-- [x] Auto LAN IP detection for mediasoup ICE candidates
-- [x] Dynamic socket URL — no hardcoded localhost
-- [x] 4-state connection status indicator in UI
-- [x] Dev-mode debug logging in browser console
-- [x] Email invite with correct LAN-aware join URL
+Built for the **AtomQuest Hackathon 2026**. All rights reserved.
