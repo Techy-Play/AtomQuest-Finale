@@ -179,64 +179,66 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
         producerId, rtpCapabilities: device.rtpCapabilities,
       });
       const kind = cd.kind as 'audio' | 'video';
-      console.log('[ConnectDesk] consumeProducer: got consumer data kind=', kind, 'consumerId=', cd.id);
+      console.log('[ConnectDesk] consumeProducer: got consumer kind=', kind, 'id=', cd.id);
 
-      // ── ECHO FIX: close any existing consumer of the same kind for this peer ──
-      // Without this, if startVideo is called twice or a peer re-produces, the OLD
-      // audio track stays in the MediaStream and plays alongside the new one → echo.
+      // ECHO FIX: close stale consumer of the same kind for this peer BEFORE creating the new one.
+      // This prevents the old audio track from continuing to play alongside the new one.
       const peerKinds = peerConsumerKindRef.current.get(peerSocketId) || {};
-      const prevConsumerId = kind === 'audio' ? peerKinds.audio : peerKinds.video;
-      if (prevConsumerId && prevConsumerId !== cd.id) {
-        const prev = consumersRef.current.get(prevConsumerId);
-        if (prev) {
-          console.log('[ConnectDesk] consumeProducer: closing stale', kind, 'consumer', prevConsumerId);
-          try { prev.close(); } catch {}
-          consumersRef.current.delete(prevConsumerId);
-          // Remove the old track from the remote stream
-          setRemoteStreams((prev) => {
-            const m = new Map(prev);
-            const ex = m.get(peerSocketId);
-            if (ex && prev?.track) {
-              ex.stream.getAudioTracks().forEach((t) => { if (t !== prev.track) { ex.stream.removeTrack(t); t.stop(); } });
-            }
-            return m;
-          });
+      const staleId = kind === 'audio' ? peerKinds.audio : peerKinds.video;
+      if (staleId && staleId !== cd.id) {
+        const stale = consumersRef.current.get(staleId);
+        if (stale) {
+          console.log('[ConnectDesk] consumeProducer: closing stale', kind, 'consumer', staleId);
+          try { stale.close(); } catch {}
+          consumersRef.current.delete(staleId);
         }
       }
-      peerConsumerKindRef.current.set(peerSocketId, {
-        ...peerKinds,
-        [kind]: cd.id,
-      });
-      // ────────────────────────────────────────────────────────────────────────
+      // Record new consumer ID for this peer+kind BEFORE awaiting transport.consume
+      peerConsumerKindRef.current.set(peerSocketId, { ...peerKinds, [kind]: cd.id });
 
       const consumer = await transport.consume({
         id: cd.id, producerId: cd.producerId, kind, rtpParameters: cd.rtpParameters,
       });
       consumersRef.current.set(consumer.id, consumer);
       await emitAsync('resume-consumer', { sessionId: sessionIdRef.current, consumerId: consumer.id });
-      console.log('[ConnectDesk] consumeProducer: resumed consumer', consumer.id);
+      console.log('[ConnectDesk] consumeProducer: resumed consumer', consumer.id, 'track:', consumer.track.id);
 
-      setRemoteStreams((prev) => {
-        const m = new Map(prev);
-        const ex = m.get(peerSocketId);
-        if (ex) {
-          // Remove old tracks of the same kind before adding the new one
-          const oldTracks = kind === 'audio' ? ex.stream.getAudioTracks() : ex.stream.getVideoTracks();
-          oldTracks.forEach((t) => { if (t.id !== consumer.track.id) ex.stream.removeTrack(t); });
-          if (!ex.stream.getTracks().map((tk) => tk.id).includes(consumer.track.id)) {
-            ex.stream.addTrack(consumer.track);
+      // Add track to remote stream (or create new stream for this peer)
+      setRemoteStreams((curStreams) => {
+        const m = new Map(curStreams);
+        const existing = m.get(peerSocketId);
+        if (existing) {
+          // Remove any old tracks of the same kind to prevent echo/duplicate audio
+          const oldTracks = kind === 'audio'
+            ? existing.stream.getAudioTracks()
+            : existing.stream.getVideoTracks();
+          oldTracks.forEach((t) => {
+            if (t.id !== consumer.track.id) existing.stream.removeTrack(t);
+          });
+          // Add new track if not already present
+          if (!existing.stream.getTrackById(consumer.track.id)) {
+            existing.stream.addTrack(consumer.track);
           }
-          m.set(peerSocketId, { ...ex, peerName: peerName || ex.peerName, peerRole: peerRole || ex.peerRole });
+          m.set(peerSocketId, {
+            ...existing,
+            peerName: peerName || existing.peerName,
+            peerRole: peerRole || existing.peerRole,
+          });
         } else {
           m.set(peerSocketId, {
-            peerId: peerSocketId, peerName: peerName || 'Participant', peerRole: peerRole || 'CUSTOMER',
-            stream: new MediaStream([consumer.track]), audioEnabled: true, videoEnabled: true,
+            peerId: peerSocketId,
+            peerName: peerName || 'Participant',
+            peerRole: peerRole || 'CUSTOMER',
+            stream: new MediaStream([consumer.track]),
+            audioEnabled: true,
+            videoEnabled: true,
           });
         }
         return m;
       });
     } catch (err) { console.error('[ConnectDesk] consumeProducer error:', err); }
   }, [emitAsync, createRecvTransport]);
+
 
   // --------------------------------------------------------------------------
   // Socket events
