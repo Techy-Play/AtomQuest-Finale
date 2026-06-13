@@ -157,7 +157,10 @@ async function main() {
   workerReady = true;
   console.log('✅ mediasoup worker ready — accepting connections');
 
+  // SO_REUSEADDR: lets the server bind to port 3001 even if old TIME_WAIT sockets
+  // from a previous run still exist. Without this, rapid restarts fail with EADDRINUSE.
   const httpServer = createServer();
+
   const io = new SocketIOServer(httpServer, {
     cors: {
       origin: '*',
@@ -401,17 +404,33 @@ async function main() {
     });
   });
 
-  // Listen on all interfaces (0.0.0.0) so both laptop and mobile can connect
-  httpServer.listen(port, '0.0.0.0', () => {
-    console.log(`
+  // Listen with retry on EADDRINUSE (TIME_WAIT from previous run)
+  function listenWithRetry(attempt = 1) {
+    httpServer.listen(port, '0.0.0.0', () => {
+      const lip = LAN_IP;
+      console.log(`
     ╔═══════════════════════════════════════════════════════╗
     ║  🎥  mediasoup SFU + Socket.IO Server                 ║
     ║  📡  Laptop : http://localhost:${port}                    ║
-    ║  📱  Mobile : http://${LAN_IP}:${port}               ║
-    ║  🔌  Server-routed media — announcedIP: ${LAN_IP}   ║
+    ║  📱  Mobile : http://${lip}:${port}               ║
+    ║  🔌  Server-routed media — announcedIP: ${lip}   ║
     ╚═══════════════════════════════════════════════════════╝
-    `);
-  });
+      `);
+    });
+    httpServer.once('error', (err: any) => {
+      if (err.code === 'EADDRINUSE' && attempt <= 10) {
+        const wait = attempt * 1500;
+        console.warn(`[SFU] Port ${port} in TIME_WAIT — retrying in ${wait}ms (attempt ${attempt}/10)...`);
+        setTimeout(() => {
+          httpServer.close();
+          listenWithRetry(attempt + 1);
+        }, wait);
+      } else {
+        throw err;
+      }
+    });
+  }
+  listenWithRetry();
 }
 
 main().catch(console.error);
