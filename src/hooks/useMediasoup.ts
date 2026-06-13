@@ -5,12 +5,13 @@ import { io, Socket } from 'socket.io-client';
 import * as mediasoupClient from 'mediasoup-client';
 import type { Device, Transport, Producer, Consumer } from 'mediasoup-client/lib/types';
 
+// --- Types --------------------------------------------------------------------
+
 interface PeerInfo {
   socketId: string;
   userId: string;
   name: string;
   role: string;
-  hasProducers?: boolean;
   producers?: { id: string; kind: string }[];
 }
 
@@ -36,6 +37,8 @@ export interface ChatMsg {
   createdAt: string;
 }
 
+export type SupportMode = 'chat' | 'voice' | 'video';
+
 interface UseMediasoupOptions {
   sessionId: string;
   userId: string;
@@ -44,500 +47,353 @@ interface UseMediasoupOptions {
   onSessionEnded?: () => void;
 }
 
-export function useMediasoup({ sessionId, userId, userName, userRole, onSessionEnded }: UseMediasoupOptions) {
-  const socketRef = useRef<Socket | null>(null);
-  const deviceRef = useRef<Device | null>(null);
-  const sendTransportRef = useRef<Transport | null>(null);
-  const recvTransportRef = useRef<Transport | null>(null);
-  const audioProducerRef = useRef<Producer | null>(null);
-  const videoProducerRef = useRef<Producer | null>(null);
-  const consumersRef = useRef<Map<string, Consumer>>(new Map());
-  const localStreamRef = useRef<MediaStream | null>(null);
-  // Use refs to hold latest callbacks â€” avoids stale closures in socket listeners
-  const onSessionEndedRef = useRef(onSessionEnded);
-  const sessionIdRef = useRef(sessionId);
-  const userIdRef = useRef(userId);
-  const userNameRef = useRef(userName);
-  const userRoleRef = useRef(userRole);
+// --- Hook ---------------------------------------------------------------------
 
-  // Keep refs in sync
+export function useMediasoup({ sessionId, userId, userName, userRole, onSessionEnded }: UseMediasoupOptions) {
+
+  const socketRef         = useRef<Socket | null>(null);
+  const deviceRef         = useRef<Device | null>(null);
+  const sendTransportRef  = useRef<Transport | null>(null);
+  const recvTransportRef  = useRef<Transport | null>(null);
+  const audioProducerRef  = useRef<Producer | null>(null);
+  const videoProducerRef  = useRef<Producer | null>(null);
+  const consumersRef      = useRef<Map<string, Consumer>>(new Map());
+  const localStreamRef    = useRef<MediaStream | null>(null);
+
+  const onSessionEndedRef = useRef(onSessionEnded);
+  const sessionIdRef      = useRef(sessionId);
+  const userIdRef         = useRef(userId);
+  const userNameRef       = useRef(userName);
+  const userRoleRef       = useRef(userRole);
+
   useEffect(() => { onSessionEndedRef.current = onSessionEnded; }, [onSessionEnded]);
   useEffect(() => { sessionIdRef.current = sessionId; }, [sessionId]);
   useEffect(() => { userIdRef.current = userId; }, [userId]);
   useEffect(() => { userNameRef.current = userName; }, [userName]);
   useEffect(() => { userRoleRef.current = userRole; }, [userRole]);
 
-  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
-  const [remoteStreams, setRemoteStreams] = useState<Map<string, RemoteStream>>(new Map());
-  const [chatMessages, setChatMessages] = useState<ChatMsg[]>([]);
-  const [isConnected, setIsConnected] = useState(false);
-  const [isAudioEnabled, setIsAudioEnabled] = useState(true);
-  const [isVideoEnabled, setIsVideoEnabled] = useState(true);
-  const [peers, setPeers] = useState<PeerInfo[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const [localStream,          setLocalStream]          = useState<MediaStream | null>(null);
+  const [remoteStreams,        setRemoteStreams]         = useState<Map<string, RemoteStream>>(new Map());
+  const [chatMessages,         setChatMessages]         = useState<ChatMsg[]>([]);
+  const [isConnected,          setIsConnected]          = useState(false);
+  const [isConnecting,         setIsConnecting]         = useState(false);
+  const [isAudioEnabled,       setIsAudioEnabled]       = useState(false);
+  const [isVideoEnabled,       setIsVideoEnabled]       = useState(false);
+  const [supportMode,          setSupportMode]          = useState<SupportMode>('chat');
+  const [mediaWarning,         setMediaWarning]         = useState<string | null>(null);
+  const [error,                setError]                = useState<string | null>(null);
+  const [peers,                setPeers]                = useState<PeerInfo[]>([]);
+  const [incomingVideoRequest, setIncomingVideoRequest] = useState(false);
+  const [videoRequestPending,  setVideoRequestPending]  = useState(false);
 
-  // Helper to emit with callback (promise-based)
+  // -- emit helper ------------------------------------------------------------
+
   const emitAsync = useCallback((event: string, data: any): Promise<any> => {
     return new Promise((resolve, reject) => {
-      const socket = socketRef.current;
-      if (!socket) return reject(new Error('Socket not connected'));
-      socket.emit(event, data, (response: any) => {
-        if (response?.error) reject(new Error(response.error));
-        else resolve(response);
+      const s = socketRef.current;
+      if (!s?.connected) return reject(new Error('Socket not connected'));
+      s.emit(event, data, (res: any) => {
+        if (res?.error) reject(new Error(res.error));
+        else resolve(res);
       });
     });
   }, []);
 
-  // Create send transport
+  // -- transports ------------------------------------------------------------
+
   const createSendTransport = useCallback(async () => {
     const device = deviceRef.current;
-    if (!device) return;
+    if (!device) return null;
     const sid = sessionIdRef.current;
-
-    const transportData = await emitAsync('create-transport', { sessionId: sid, direction: 'send' });
-
-    const transport = device.createSendTransport({
-      id: transportData.id,
-      iceParameters: transportData.iceParameters,
-      iceCandidates: transportData.iceCandidates,
-      dtlsParameters: transportData.dtlsParameters,
-    });
-
-    transport.on('connect', async ({ dtlsParameters }, callback, errback) => {
-      try {
-        await emitAsync('connect-transport', { sessionId: sid, transportId: transport.id, dtlsParameters });
-        callback();
-      } catch (err) { errback(err as Error); }
-    });
-
-    transport.on('produce', async ({ kind, rtpParameters, appData }, callback, errback) => {
-      try {
-        const { id } = await emitAsync('produce', { sessionId: sid, transportId: transport.id, kind, rtpParameters, appData });
-        callback({ id });
-      } catch (err) { errback(err as Error); }
-    });
-
-    sendTransportRef.current = transport;
-    return transport;
+    const d = await emitAsync('create-transport', { sessionId: sid, direction: 'send' });
+    const t = device.createSendTransport({ id: d.id, iceParameters: d.iceParameters, iceCandidates: d.iceCandidates, dtlsParameters: d.dtlsParameters });
+    t.on('connect', async ({ dtlsParameters }, cb, eb) => { try { await emitAsync('connect-transport', { sessionId: sid, transportId: t.id, dtlsParameters }); cb(); } catch (e) { eb(e as Error); } });
+    t.on('produce', async ({ kind, rtpParameters, appData }, cb, eb) => { try { const { id } = await emitAsync('produce', { sessionId: sid, transportId: t.id, kind, rtpParameters, appData }); cb({ id }); } catch (e) { eb(e as Error); } });
+    sendTransportRef.current = t;
+    return t;
   }, [emitAsync]);
 
-  // Create receive transport
   const createRecvTransport = useCallback(async () => {
     const device = deviceRef.current;
-    if (!device) return;
+    if (!device) return null;
     const sid = sessionIdRef.current;
-
-    const transportData = await emitAsync('create-transport', { sessionId: sid, direction: 'recv' });
-
-    const transport = device.createRecvTransport({
-      id: transportData.id,
-      iceParameters: transportData.iceParameters,
-      iceCandidates: transportData.iceCandidates,
-      dtlsParameters: transportData.dtlsParameters,
-    });
-
-    transport.on('connect', async ({ dtlsParameters }, callback, errback) => {
-      try {
-        await emitAsync('connect-transport', { sessionId: sid, transportId: transport.id, dtlsParameters });
-        callback();
-      } catch (err) { errback(err as Error); }
-    });
-
-    recvTransportRef.current = transport;
-    return transport;
+    const d = await emitAsync('create-transport', { sessionId: sid, direction: 'recv' });
+    const t = device.createRecvTransport({ id: d.id, iceParameters: d.iceParameters, iceCandidates: d.iceCandidates, dtlsParameters: d.dtlsParameters });
+    t.on('connect', async ({ dtlsParameters }, cb, eb) => { try { await emitAsync('connect-transport', { sessionId: sid, transportId: t.id, dtlsParameters }); cb(); } catch (e) { eb(e as Error); } });
+    recvTransportRef.current = t;
+    return t;
   }, [emitAsync]);
 
-  // Consume a remote producer
+  // -- consume remote producer ------------------------------------------------
+
   const consumeProducer = useCallback(async (producerId: string, peerSocketId: string) => {
     const device = deviceRef.current;
-    let transport = recvTransportRef.current;
     if (!device) return;
-
-    if (!transport) {
-      transport = (await createRecvTransport()) || null;
-      if (!transport) return;
-    }
-
+    let transport = recvTransportRef.current;
+    if (!transport) { transport = (await createRecvTransport()) ?? null; if (!transport) return; }
     try {
-      const consumerData = await emitAsync('consume', {
-        sessionId: sessionIdRef.current,
-        transportId: transport.id,
-        producerId,
-        rtpCapabilities: device.rtpCapabilities,
-      });
-
-      const consumer = await transport.consume({
-        id: consumerData.id,
-        producerId: consumerData.producerId,
-        kind: consumerData.kind,
-        rtpParameters: consumerData.rtpParameters,
-      });
-
+      const cd = await emitAsync('consume', { sessionId: sessionIdRef.current, transportId: transport.id, producerId, rtpCapabilities: device.rtpCapabilities });
+      const consumer = await transport.consume({ id: cd.id, producerId: cd.producerId, kind: cd.kind, rtpParameters: cd.rtpParameters });
       consumersRef.current.set(consumer.id, consumer);
-
-      // Resume the consumer FIRST so the track is live before we attach it to a video element
       await emitAsync('resume-consumer', { sessionId: sessionIdRef.current, consumerId: consumer.id });
-
       setRemoteStreams((prev) => {
-        const newMap = new Map(prev);
-        const existing = newMap.get(peerSocketId);
-        if (existing) {
-          // Only add track if not already present
-          const trackIds = existing.stream.getTracks().map((t) => t.id);
-          if (!trackIds.includes(consumer.track.id)) {
-            existing.stream.addTrack(consumer.track);
-          }
-          newMap.set(peerSocketId, { ...existing });
+        const m = new Map(prev);
+        const ex = m.get(peerSocketId);
+        if (ex) {
+          if (!ex.stream.getTracks().map((t) => t.id).includes(consumer.track.id)) ex.stream.addTrack(consumer.track);
+          m.set(peerSocketId, { ...ex });
         } else {
-          const stream = new MediaStream([consumer.track]);
-          newMap.set(peerSocketId, {
-            peerId: peerSocketId,
-            peerName: 'Participant',
-            peerRole: 'CUSTOMER',
-            stream,
-            audioEnabled: true,
-            videoEnabled: true,
-          });
+          m.set(peerSocketId, { peerId: peerSocketId, peerName: 'Participant', peerRole: 'CUSTOMER', stream: new MediaStream([consumer.track]), audioEnabled: true, videoEnabled: true });
         }
-        return newMap;
+        return m;
       });
-    } catch (err) {
-      console.error('Failed to consume producer:', err);
-    }
+    } catch (err) { console.error('consumeProducer error:', err); }
   }, [emitAsync, createRecvTransport]);
 
-  // Connect to the room
-  const connect = useCallback(async () => {
-    // Prevent double-connect
-    if (socketRef.current?.connected) return;
+  // -- socket events ---------------------------------------------------------
 
-    try {
-      // Get local media
-      let stream: MediaStream;
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          audio: true,
-          video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
-        });
-      } catch (mediaErr: any) {
-        if (mediaErr.name === 'NotReadableError') {
-          throw new Error('Camera/Microphone is already in use by another application. Close other video apps and try again.');
-        } else if (mediaErr.name === 'NotAllowedError') {
-          throw new Error('Camera/Microphone permission denied. Please allow access in your browser settings.');
-        } else if (mediaErr.name === 'NotFoundError') {
-          throw new Error('No camera or microphone found. Please connect a device and try again.');
-        }
-        throw mediaErr;
-      }
-      localStreamRef.current = stream;
-      setLocalStream(stream);
-
-      // Connect socket to the mediasoup server
-      // Use the LAN IP dynamically so mobile devices on 192.168.1.x also work
-      const socketUrl = process.env.NEXT_PUBLIC_SOCKET_URL
-        || `${window.location.protocol}//${window.location.hostname}:3001`;
-
-      const socket = io(socketUrl, {
-        path: '/socket.io',
-        transports: ['polling', 'websocket'], // polling first â€” avoids raw WS error spam
-        reconnection: false,                  // manual retry from user â€” don't loop silently
-        timeout: 8000,
-        forceNew: true,
+  const registerSocketEvents = useCallback((socket: Socket) => {
+    socket.on('peer-joined', (peer: PeerInfo) => setPeers((p) => [...p.filter((x) => x.socketId !== peer.socketId), peer]));
+    socket.on('peer-left', ({ socketId }: { socketId: string }) => {
+      setPeers((p) => p.filter((x) => x.socketId !== socketId));
+      setRemoteStreams((p) => { const m = new Map(p); m.delete(socketId); return m; });
+    });
+    socket.on('new-producer', async ({ producerId, socketId }: { producerId: string; socketId: string }) => {
+      await consumeProducer(producerId, socketId);
+      setPeers((cp) => {
+        const peer = cp.find((p) => p.socketId === socketId);
+        if (peer) setRemoteStreams((prev) => { const m = new Map(prev); const e = m.get(socketId); if (e) m.set(socketId, { ...e, peerName: peer.name, peerRole: peer.role }); return m; });
+        return cp;
       });
+    });
+    socket.on('producer-closed', ({ producerId }: { producerId: string }) => {
+      consumersRef.current.forEach((c, cid) => { if (c.producerId === producerId) { c.close(); consumersRef.current.delete(cid); } });
+    });
+    socket.on('consumer-closed', ({ consumerId }: { consumerId: string }) => {
+      const c = consumersRef.current.get(consumerId); if (c) { c.close(); consumersRef.current.delete(consumerId); }
+    });
+    socket.on('media-state-change', ({ socketId, kind, enabled }: { socketId: string; kind: string; enabled: boolean }) => {
+      setRemoteStreams((prev) => { const m = new Map(prev); const r = m.get(socketId); if (r) { if (kind === 'audio') r.audioEnabled = enabled; if (kind === 'video') r.videoEnabled = enabled; m.set(socketId, { ...r }); } return m; });
+    });
+    socket.on('chat-message', (msg: ChatMsg) => setChatMessages((p) => p.some((m) => m.id === msg.id) ? p : [...p, msg]));
+    socket.on('session-ended', () => onSessionEndedRef.current?.());
+    socket.on('video-request', () => setIncomingVideoRequest(true));
+    socket.on('video-request-accepted', () => setVideoRequestPending(false));
+    socket.on('video-request-declined', () => { setVideoRequestPending(false); setMediaWarning('Customer declined the video request.'); });
+  }, [consumeProducer]);
+
+  // -------------------------------------------------------------------------
+  // TIER 1 — connect() — socket + room join, NO media permissions
+  // -------------------------------------------------------------------------
+
+  const connect = useCallback(async () => {
+    if (socketRef.current?.connected) return;
+    setIsConnecting(true);
+    setError(null);
+    try {
+      const url = process.env.NEXT_PUBLIC_SOCKET_URL || `${window.location.protocol}//${window.location.hostname}:3001`;
+      const socket = io(url, { path: '/socket.io', transports: ['polling', 'websocket'], reconnection: false, timeout: 8000, forceNew: true });
       socketRef.current = socket;
 
       await new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          socket.disconnect();
-          reject(new Error('Could not reach the video server. Make sure the SFU server is running on port 3001 (run: npx ts-node server.ts).'));
-        }, 8000);
-        socket.on('connect', () => { clearTimeout(timeout); resolve(); });
-        socket.on('connect_error', (err) => {
-          clearTimeout(timeout);
-          socket.disconnect();
-          reject(new Error(`Video server unreachable: ${err.message}. Make sure the SFU server is running (port 3001).`));
-        });
+        const t = setTimeout(() => { socket.disconnect(); reject(new Error('Could not reach support server. Is the SFU running on port 3001?')); }, 8000);
+        socket.on('connect', () => { clearTimeout(t); resolve(); });
+        socket.on('connect_error', (err) => { clearTimeout(t); socket.disconnect(); reject(new Error(`Server unreachable: ${err.message}`)); });
       });
 
-      // Join room
-      const joinData = await emitAsync('join-room', {
-        sessionId: sessionIdRef.current,
-        userId: userIdRef.current,
-        name: userNameRef.current,
-        role: userRoleRef.current,
-      });
+      const joinData = await emitAsync('join-room', { sessionId: sessionIdRef.current, userId: userIdRef.current, name: userNameRef.current, role: userRoleRef.current });
 
-      // Load mediasoup device
       const device = new mediasoupClient.Device();
       await device.load({ routerRtpCapabilities: joinData.routerRtpCapabilities });
       deviceRef.current = device;
 
-      // Create send transport and produce
-      const sendTransport = await createSendTransport();
-      if (sendTransport) {
-        const audioTrack = stream.getAudioTracks()[0];
-        if (audioTrack) {
-          audioProducerRef.current = await sendTransport.produce({
-            track: audioTrack,
-            appData: { mediaType: 'audio' },
-          });
-        }
-
-        const videoTrack = stream.getVideoTracks()[0];
-        if (videoTrack) {
-          videoProducerRef.current = await sendTransport.produce({
-            track: videoTrack,
-            appData: { mediaType: 'video' },
-            encodings: [
-              { maxBitrate: 100000 },
-              { maxBitrate: 300000 },
-              { maxBitrate: 900000 },
-            ],
-            codecOptions: { videoGoogleStartBitrate: 1000 },
-          });
-        }
-      }
-
-      // Create recv transport
       await createRecvTransport();
 
-      // Set existing peers and update remote stream names
       const existingPeers: PeerInfo[] = joinData.existingPeers || [];
       setPeers(existingPeers);
-
-      // Consume existing producers from peers already in the room
       for (const peer of existingPeers) {
         if (peer.producers && peer.producers.length > 0) {
           for (const prod of peer.producers) {
             await consumeProducer(prod.id, peer.socketId);
-            // Update peer name in remote streams
-            setRemoteStreams((prev) => {
-              const newMap = new Map(prev);
-              const entry = newMap.get(peer.socketId);
-              if (entry) {
-                newMap.set(peer.socketId, { ...entry, peerName: peer.name, peerRole: peer.role });
-              }
-              return newMap;
-            });
+            setRemoteStreams((prev) => { const m = new Map(prev); const e = m.get(peer.socketId); if (e) m.set(peer.socketId, { ...e, peerName: peer.name, peerRole: peer.role }); return m; });
           }
         }
       }
 
-      // â€”â€”â€” Register all socket event listeners HERE, after joining â€”â€”â€”
-
-      socket.on('peer-joined', (peer: PeerInfo) => {
-        setPeers((prev) => [...prev.filter((p) => p.socketId !== peer.socketId), peer]);
-      });
-
-      socket.on('peer-left', ({ socketId }: { socketId: string }) => {
-        setPeers((prev) => prev.filter((p) => p.socketId !== socketId));
-        setRemoteStreams((prev) => {
-          const newMap = new Map(prev);
-          newMap.delete(socketId);
-          return newMap;
-        });
-      });
-
-      socket.on('new-producer', async ({ producerId, socketId, kind }: { producerId: string; socketId: string; kind: string }) => {
-        await consumeProducer(producerId, socketId);
-        // Update peer name from peers list
-        setPeers((currentPeers) => {
-          const peer = currentPeers.find((p) => p.socketId === socketId);
-          if (peer) {
-            setRemoteStreams((prev) => {
-              const newMap = new Map(prev);
-              const entry = newMap.get(socketId);
-              if (entry) {
-                newMap.set(socketId, { ...entry, peerName: peer.name, peerRole: peer.role });
-              }
-              return newMap;
-            });
-          }
-          return currentPeers;
-        });
-      });
-
-      socket.on('producer-closed', ({ producerId }: { producerId: string }) => {
-        consumersRef.current.forEach((consumer, consumerId) => {
-          if (consumer.producerId === producerId) {
-            consumer.close();
-            consumersRef.current.delete(consumerId);
-          }
-        });
-      });
-
-      socket.on('consumer-closed', ({ consumerId }: { consumerId: string }) => {
-        const consumer = consumersRef.current.get(consumerId);
-        if (consumer) {
-          consumer.close();
-          consumersRef.current.delete(consumerId);
-        }
-      });
-
-      socket.on('media-state-change', ({ socketId, kind, enabled }: { socketId: string; kind: string; enabled: boolean }) => {
-        setRemoteStreams((prev) => {
-          const newMap = new Map(prev);
-          const remote = newMap.get(socketId);
-          if (remote) {
-            if (kind === 'audio') remote.audioEnabled = enabled;
-            if (kind === 'video') remote.videoEnabled = enabled;
-            newMap.set(socketId, { ...remote });
-          }
-          return newMap;
-        });
-      });
-
-      // Chat: receive messages from other peers
-      socket.on('chat-message', (message: ChatMsg) => {
-        setChatMessages((prev) => {
-          // Deduplicate by ID
-          if (prev.some((m) => m.id === message.id)) return prev;
-          return [...prev, message];
-        });
-      });
-
-      socket.on('session-ended', () => {
-        onSessionEndedRef.current?.();
-      });
-
+      registerSocketEvents(socket);
       setIsConnected(true);
+      setSupportMode('chat');
     } catch (err: any) {
-      console.error('Connection error:', err);
-      setError(err.message || 'Failed to connect');
-
-      if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach((t) => t.stop());
-        localStreamRef.current = null;
-        setLocalStream(null);
-      }
+      console.error('Connect error:', err);
+      setError(err.message || 'Failed to connect to session');
       socketRef.current?.disconnect();
       socketRef.current = null;
+    } finally {
+      setIsConnecting(false);
     }
-  }, [emitAsync, createSendTransport, createRecvTransport, consumeProducer]);
+  }, [emitAsync, createRecvTransport, consumeProducer, registerSocketEvents]);
 
-  // Toggle audio
-  const toggleAudio = useCallback(() => {
-    if (localStreamRef.current) {
-      const audioTrack = localStreamRef.current.getAudioTracks()[0];
-      if (audioTrack) {
-        audioTrack.enabled = !audioTrack.enabled;
-        setIsAudioEnabled(audioTrack.enabled);
-        socketRef.current?.emit('media-state-change', {
-          sessionId: sessionIdRef.current,
-          kind: 'audio',
-          enabled: audioTrack.enabled,
-        });
-      }
-    }
-  }, []);
+  // -------------------------------------------------------------------------
+  // TIER 2 — startVoice() — microphone only
+  // -------------------------------------------------------------------------
 
-  // Toggle video
-  const toggleVideo = useCallback(() => {
-    if (localStreamRef.current) {
-      const videoTrack = localStreamRef.current.getVideoTracks()[0];
-      if (videoTrack) {
-        videoTrack.enabled = !videoTrack.enabled;
-        setIsVideoEnabled(videoTrack.enabled);
-        socketRef.current?.emit('media-state-change', {
-          sessionId: sessionIdRef.current,
-          kind: 'video',
-          enabled: videoTrack.enabled,
-        });
-      }
-    }
-  }, []);
-
-  // Send chat message (text or file)
-  const sendMessage = useCallback(async (
-    content: string,
-    type: 'TEXT' | 'FILE' = 'TEXT',
-    fileUrl?: string,
-    fileName?: string,
-    fileSize?: number,
-  ) => {
-    const sid = sessionIdRef.current;
-    const uid = userIdRef.current;
-    const uname = userNameRef.current;
-    const urole = userRoleRef.current;
-
-    const message: ChatMsg = {
-      id: crypto.randomUUID(),
-      senderId: uid,
-      senderName: uname,
-      senderRole: urole,
-      content,
-      type,
-      fileUrl,
-      fileName,
-      fileSize,
-      createdAt: new Date().toISOString(),
-    };
-
-    // Add to local state immediately
-    setChatMessages((prev) => [...prev, message]);
-
-    // Relay to other peers via socket
-    socketRef.current?.emit('chat-message', { sessionId: sid, message });
-
-    // Persist to database
+  const startVoice = useCallback(async () => {
+    if (!deviceRef.current || !socketRef.current?.connected) return;
+    setMediaWarning(null);
+    let stream: MediaStream;
     try {
-      await fetch(`/api/sessions/${sid}/messages`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content, type, fileUrl, fileName, fileSize }),
-      });
-    } catch (err) {
-      console.error('Failed to persist message:', err);
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    } catch (err: any) {
+      const msg = err.name === 'NotAllowedError' ? 'Microphone permission denied. You can still use chat.'
+        : err.name === 'NotFoundError' ? 'No microphone found. You can still use chat.'
+        : err.name === 'NotReadableError' ? 'Microphone is in use by another app.'
+        : 'Could not access microphone. You can still use chat.';
+      setMediaWarning(msg);
+      return;
     }
+    if (localStreamRef.current) {
+      stream.getAudioTracks().forEach((t) => localStreamRef.current!.addTrack(t));
+    } else {
+      localStreamRef.current = stream;
+      setLocalStream(stream);
+    }
+    try {
+      let st = sendTransportRef.current;
+      if (!st) st = (await createSendTransport()) ?? null;
+      if (!st) return;
+      const at = stream.getAudioTracks()[0];
+      if (at && !audioProducerRef.current) {
+        audioProducerRef.current = await st.produce({ track: at, appData: { mediaType: 'audio' } });
+      }
+      setIsAudioEnabled(true);
+      setSupportMode('voice');
+      socketRef.current?.emit('media-state-change', { sessionId: sessionIdRef.current, kind: 'audio', enabled: true });
+    } catch (e: any) {
+      console.error('startVoice produce error:', e);
+      setMediaWarning('Failed to start voice. You can still use chat.');
+    }
+  }, [createSendTransport]);
+
+  // -------------------------------------------------------------------------
+  // TIER 3 — startVideo() — camera + mic
+  // -------------------------------------------------------------------------
+
+  const startVideo = useCallback(async () => {
+    if (!deviceRef.current || !socketRef.current?.connected) return;
+    setMediaWarning(null);
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } } });
+    } catch (err: any) {
+      const msg = err.name === 'NotAllowedError' ? 'Camera permission denied. You can still use voice/chat.'
+        : err.name === 'NotFoundError' ? 'No camera found. You can still use voice/chat.'
+        : err.name === 'NotReadableError' ? 'Camera is in use by another app.'
+        : 'Could not access camera. You can still use voice/chat.';
+      setMediaWarning(msg);
+      return;
+    }
+    if (localStreamRef.current) { localStreamRef.current.getTracks().forEach((t) => t.stop()); }
+    localStreamRef.current = stream;
+    setLocalStream(stream);
+    try {
+      let st = sendTransportRef.current;
+      if (!st) st = (await createSendTransport()) ?? null;
+      if (!st) return;
+      const at = stream.getAudioTracks()[0];
+      if (at) {
+        if (audioProducerRef.current) { audioProducerRef.current.close(); audioProducerRef.current = null; }
+        audioProducerRef.current = await st.produce({ track: at, appData: { mediaType: 'audio' } });
+      }
+      const vt = stream.getVideoTracks()[0];
+      if (vt) {
+        if (videoProducerRef.current) { videoProducerRef.current.close(); videoProducerRef.current = null; }
+        videoProducerRef.current = await st.produce({ track: vt, appData: { mediaType: 'video' }, encodings: [{ maxBitrate: 100000 }, { maxBitrate: 300000 }, { maxBitrate: 900000 }], codecOptions: { videoGoogleStartBitrate: 1000 } });
+      }
+      setIsAudioEnabled(true);
+      setIsVideoEnabled(true);
+      setSupportMode('video');
+      socketRef.current?.emit('media-state-change', { sessionId: sessionIdRef.current, kind: 'audio', enabled: true });
+      socketRef.current?.emit('media-state-change', { sessionId: sessionIdRef.current, kind: 'video', enabled: true });
+    } catch (e: any) {
+      console.error('startVideo produce error:', e);
+      setMediaWarning('Failed to start video. You can still use voice/chat.');
+    }
+  }, [createSendTransport]);
+
+  const stopMedia = useCallback(() => {
+    audioProducerRef.current?.close(); audioProducerRef.current = null;
+    videoProducerRef.current?.close(); videoProducerRef.current = null;
+    if (localStreamRef.current) { localStreamRef.current.getTracks().forEach((t) => t.stop()); localStreamRef.current = null; }
+    setLocalStream(null);
+    setIsAudioEnabled(false);
+    setIsVideoEnabled(false);
+    setSupportMode('chat');
   }, []);
 
-  // End session
+  const toggleAudio = useCallback(() => {
+    const t = localStreamRef.current?.getAudioTracks()[0];
+    if (!t) return;
+    t.enabled = !t.enabled;
+    setIsAudioEnabled(t.enabled);
+    socketRef.current?.emit('media-state-change', { sessionId: sessionIdRef.current, kind: 'audio', enabled: t.enabled });
+  }, []);
+
+  const toggleVideo = useCallback(() => {
+    const t = localStreamRef.current?.getVideoTracks()[0];
+    if (!t) return;
+    t.enabled = !t.enabled;
+    setIsVideoEnabled(t.enabled);
+    socketRef.current?.emit('media-state-change', { sessionId: sessionIdRef.current, kind: 'video', enabled: t.enabled });
+  }, []);
+
+  const requestCustomerVideo = useCallback(() => {
+    if (!socketRef.current?.connected) return;
+    setVideoRequestPending(true);
+    socketRef.current.emit('request-customer-video', { sessionId: sessionIdRef.current });
+  }, []);
+
+  const respondToVideoRequest = useCallback(async (accepted: boolean) => {
+    setIncomingVideoRequest(false);
+    socketRef.current?.emit('video-request-response', { sessionId: sessionIdRef.current, accepted });
+    if (accepted) await startVideo();
+  }, [startVideo]);
+
+  const sendMessage = useCallback(async (content: string, type: 'TEXT' | 'FILE' = 'TEXT', fileUrl?: string, fileName?: string, fileSize?: number) => {
+    const sid = sessionIdRef.current;
+    const msg: ChatMsg = { id: crypto.randomUUID(), senderId: userIdRef.current, senderName: userNameRef.current, senderRole: userRoleRef.current, content, type, fileUrl, fileName, fileSize, createdAt: new Date().toISOString() };
+    setChatMessages((p) => [...p, msg]);
+    socketRef.current?.emit('chat-message', { sessionId: sid, message: msg });
+    try { await fetch(`/api/sessions/${sid}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content, type, fileUrl, fileName, fileSize }) }); }
+    catch (e) { console.error('Failed to persist message:', e); }
+  }, []);
+
   const endSession = useCallback(async () => {
     const sid = sessionIdRef.current;
     socketRef.current?.emit('end-session', { sessionId: sid });
-    try {
-      await fetch(`/api/sessions/${sid}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'ENDED' }),
-      });
-    } catch (err) {
-      console.error('Failed to end session:', err);
-    }
+    try { await fetch(`/api/sessions/${sid}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'ENDED' }) }); }
+    catch (e) { console.error('Failed to end session:', e); }
   }, []);
 
-  // Disconnect
   const disconnect = useCallback(() => {
-    if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach((t) => t.stop());
-      localStreamRef.current = null;
-    }
-    audioProducerRef.current?.close();
-    videoProducerRef.current?.close();
+    stopMedia();
     sendTransportRef.current?.close();
     recvTransportRef.current?.close();
     consumersRef.current.forEach((c) => c.close());
     consumersRef.current.clear();
     socketRef.current?.disconnect();
-    socketRef.current = null;
-    deviceRef.current = null;
-    sendTransportRef.current = null;
-    recvTransportRef.current = null;
+    socketRef.current = null; deviceRef.current = null;
+    sendTransportRef.current = null; recvTransportRef.current = null;
     setIsConnected(false);
-    setLocalStream(null);
     setRemoteStreams(new Map());
-  }, []);
+    setSupportMode('chat');
+  }, [stopMedia]);
 
-  // Clear error
-  const clearError = useCallback(() => setError(null), []);
+  const clearError        = useCallback(() => setError(null), []);
+  const clearMediaWarning = useCallback(() => setMediaWarning(null), []);
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
-      if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach((t) => t.stop());
-        localStreamRef.current = null;
-      }
+      if (localStreamRef.current) { localStreamRef.current.getTracks().forEach((t) => t.stop()); localStreamRef.current = null; }
       sendTransportRef.current?.close();
       recvTransportRef.current?.close();
       consumersRef.current.forEach((c) => c.close());
@@ -546,21 +402,12 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
   }, []);
 
   return {
-    connect,
-    disconnect,
-    localStream,
-    remoteStreams,
-    chatMessages,
-    setChatMessages,
-    isConnected,
-    isAudioEnabled,
-    isVideoEnabled,
-    toggleAudio,
-    toggleVideo,
-    sendMessage,
-    endSession,
-    peers,
-    error,
-    clearError,
+    connect, disconnect, isConnected, isConnecting, error, clearError,
+    localStream, remoteStreams,
+    supportMode, startVoice, startVideo, stopMedia, mediaWarning, clearMediaWarning,
+    isAudioEnabled, isVideoEnabled, toggleAudio, toggleVideo,
+    requestCustomerVideo, respondToVideoRequest, incomingVideoRequest, videoRequestPending,
+    chatMessages, setChatMessages, sendMessage,
+    endSession, peers,
   };
 }

@@ -292,6 +292,31 @@ async function main() {
       socket.to(data.sessionId).emit('media-state-change', { socketId: socket.id, kind: data.kind, enabled: data.enabled });
     });
 
+    // Video escalation — agent requests customer camera
+    socket.on('request-customer-video', (data: { sessionId: string }) => {
+      // Relay to all non-agent peers in the room
+      const room = rooms.get(data.sessionId);
+      if (room) {
+        room.peers.forEach((peer, sid) => {
+          if (sid !== socket.id && peer.role !== 'AGENT') {
+            io.to(sid).emit('video-request');
+          }
+        });
+      }
+    });
+
+    // Customer responds to video request — relay result back to agent
+    socket.on('video-request-response', (data: { sessionId: string; accepted: boolean }) => {
+      const room = rooms.get(data.sessionId);
+      if (room) {
+        room.peers.forEach((peer, sid) => {
+          if (sid !== socket.id && peer.role === 'AGENT') {
+            io.to(sid).emit(data.accepted ? 'video-request-accepted' : 'video-request-declined');
+          }
+        });
+      }
+    });
+
     // End session
     socket.on('end-session', (data: { sessionId: string }) => {
       io.to(data.sessionId).emit('session-ended', { endedBy: currentUserId });
