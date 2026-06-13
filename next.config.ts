@@ -1,6 +1,10 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // Standalone output: bundles everything needed to run without node_modules
+  // The .next/standalone folder is self-contained and portable.
+  output: 'standalone',
+
   // Exclude mediasoup (server-only) from client bundles
   serverExternalPackages: ['mediasoup', 'pg'],
 

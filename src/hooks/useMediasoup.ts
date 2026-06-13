@@ -3,7 +3,12 @@
 import { useRef, useCallback, useEffect, useState } from 'react';
 import { io, Socket } from 'socket.io-client';
 import * as mediasoupClient from 'mediasoup-client';
-import type { Device, Transport, Producer, Consumer } from 'mediasoup-client/lib/types';
+// Types sourced from the namespace import to satisfy Next.js bundler module resolution
+type Device   = InstanceType<typeof mediasoupClient.Device>;
+type Transport = ReturnType<Device['createSendTransport']>;
+type Producer  = Awaited<ReturnType<Transport['produce']>>;
+type Consumer  = Awaited<ReturnType<Transport['consume']>>;
+
 
 interface PeerInfo {
   socketId: string; userId: string; name: string; role: string;

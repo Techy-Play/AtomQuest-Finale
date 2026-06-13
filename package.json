@@ -6,8 +6,16 @@
     "dev": "next dev -H 0.0.0.0 --turbopack",
     "dev:server": "npx tsx server.ts",
     "dev:all": "concurrently -k -n \"NEXT,SFU\" -c \"cyan,magenta\" \"next dev -H 0.0.0.0 --turbopack\" \"npx tsx server.ts\"",
-    "build": "next build",
-    "start": "node server.js",
+
+    "build:next": "prisma generate && next build",
+    "build:server": "tsc --project tsconfig.server.json",
+    "build": "npm run build:next && npm run build:server",
+
+    "start:next": "node .next/standalone/server.js",
+    "start:server": "node dist/server.js",
+    "start:prod": "concurrently -k -n \"NEXT,SFU\" -c \"cyan,magenta\" \"node .next/standalone/server.js\" \"node dist/server.js\"",
+
+    "setup": "npx prisma db push && npx tsx prisma/seed.ts",
     "lint": "eslint",
     "seed": "npx tsx prisma/seed.ts",
     "db:push": "npx prisma db push",

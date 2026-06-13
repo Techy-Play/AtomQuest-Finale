@@ -7,8 +7,8 @@ export function ThemeProvider({ children, ...props }: ThemeProviderProps) {
   return (
     <NextThemesProvider
       {...props}
-      // Suppress the React 19 script-tag-in-render warning (next-themes injects a script for SSR theme detection)
-      scriptProps={{ suppressHydrationWarning: true } as React.ScriptHTMLAttributes<HTMLScriptElement>}
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      scriptProps={{ suppressHydrationWarning: true } as any}
     >
       {children}
     </NextThemesProvider>

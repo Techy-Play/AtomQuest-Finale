@@ -266,7 +266,7 @@ export default function LoginPage() {
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="reg-role">Role</Label>
-                    <Select value={regRole} onValueChange={setRegRole}>
+                    <Select value={regRole} onValueChange={(v) => { if (v) setRegRole(v); }}>
                       <SelectTrigger id="reg-role">
                         <SelectValue />
                       </SelectTrigger>
