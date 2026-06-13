@@ -260,7 +260,7 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
         path: '/socket.io',
         transports: ['polling', 'websocket'],
         reconnection: false,
-        timeout: 10000,
+        timeout: 20000,   // 20s - enough for mobile on WiFi
         forceNew: true,
       });
       socketRef.current = socket;
@@ -268,12 +268,21 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
       await new Promise<void>((resolve, reject) => {
         const t = setTimeout(() => {
           socket.disconnect();
-          reject(new Error('Connection timed out. Make sure both servers are running: npm run dev:all'));
-        }, 10000);
+          reject(new Error(
+            `Connection timed out after 20s.\n` +
+            `- Is the SFU server running? (npm run dev:all)\n` +
+            `- On mobile? Run open-firewall-ports.ps1 as Administrator.\n` +
+            `- SFU URL tried: ${url}`
+          ));
+        }, 20000);
         socket.on('connect', () => { clearTimeout(t); resolve(); });
         socket.on('connect_error', (err) => {
           clearTimeout(t); socket.disconnect();
-          reject(new Error(`Cannot reach SFU at ${url} -- Detail: ${err.message}`));
+          reject(new Error(
+            `Cannot reach SFU at ${url}\n` +
+            `Detail: ${err.message}\n` +
+            `On mobile? Run open-firewall-ports.ps1 as Administrator.`
+          ));
         });
       });
 
