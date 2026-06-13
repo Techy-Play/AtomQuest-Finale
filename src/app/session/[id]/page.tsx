@@ -555,7 +555,7 @@ export default function SessionPage() {
                               </a>
                             ) : (
                               <a
-                                href={msg.fileUrl}
+                                href={isPdf ? `https://docs.google.com/viewer?url=${encodeURIComponent(msg.fileUrl)}` : msg.fileUrl}
                                 target="_blank"
                                 rel="noopener noreferrer"
                                 className={`flex items-center gap-2 px-3 py-2 underline ${
