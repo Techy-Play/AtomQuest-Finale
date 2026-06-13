@@ -16,20 +16,41 @@ import type {
 
 const port = parseInt(process.env.SOCKET_PORT || '3001', 10);
 
+// Known virtual/software adapter name fragments to skip.
+// We want the real WiFi/Ethernet IP, not VirtualBox / VMware / Hyper-V.
+const VIRTUAL_ADAPTER_PATTERNS = [
+  'vethernet', 'virtualbox', 'vmware', 'vmnet', 'vbox',
+  'hyper-v', 'hyperv', 'loopback', 'pseudo', 'tunnel',
+  'isatap', 'teredo', '6to4', 'bluetooth',
+];
+
+function isVirtualAdapter(name: string): boolean {
+  const lower = name.toLowerCase();
+  return VIRTUAL_ADAPTER_PATTERNS.some((p) => lower.includes(p));
+}
+
 // Auto-detect LAN IP for mediasoup ICE candidate announcement.
-// When MEDIASOUP_ANNOUNCED_IP is not set, we find the first non-loopback
-// IPv4 address (e.g. 192.168.1.30) so mobile devices can reach us.
+// Prefers WiFi/Ethernet over virtual adapters.
 function getLanIp(): string {
   if (process.env.MEDIASOUP_ANNOUNCED_IP) return process.env.MEDIASOUP_ANNOUNCED_IP;
   const nets = networkInterfaces();
+
+  // First pass: prefer non-virtual adapters
   for (const name of Object.keys(nets)) {
+    if (isVirtualAdapter(name)) continue;
     for (const net of nets[name] ?? []) {
-      if (net.family === 'IPv4' && !net.internal) {
-        return net.address; // e.g. 192.168.1.30
-      }
+      if (net.family === 'IPv4' && !net.internal) return net.address;
     }
   }
-  return '127.0.0.1'; // fallback
+
+  // Second pass: fall back to any non-internal IPv4 (including virtual)
+  for (const name of Object.keys(nets)) {
+    for (const net of nets[name] ?? []) {
+      if (net.family === 'IPv4' && !net.internal) return net.address;
+    }
+  }
+
+  return '127.0.0.1';
 }
 
 const LAN_IP = getLanIp();

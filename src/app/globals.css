@@ -1,4 +1,4 @@
-@import "tailwindcss";
+﻿@import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 
@@ -250,3 +250,6 @@
   background: oklch(0.6 0.22 25);
   animation: pulse-glow 1.5s ease-in-out infinite;
 }
+/* Mobile safe-area utilities for notch / home bar */
+.safe-top    { padding-top: env(safe-area-inset-top); }
+.safe-bottom { padding-bottom: env(safe-area-inset-bottom); }

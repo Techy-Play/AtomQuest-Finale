@@ -40,6 +40,9 @@ export async function POST(req: NextRequest) {
 
     // Validate file size (500MB for video, 10MB for others)
     const MAX_SIZE = isVideo ? 500 * 1024 * 1024 : 10 * 1024 * 1024;
+    if (file.size === 0) {
+      return NextResponse.json({ error: 'Empty file' }, { status: 400 });
+    }
     if (file.size > MAX_SIZE) {
       return NextResponse.json({ error: `File too large. Max ${isVideo ? '500MB' : '10MB'} allowed.` }, { status: 400 });
     }
