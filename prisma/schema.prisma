@@ -1,0 +1,119 @@
+// Real-Time Video Support Platform — Prisma Schema
+// Database: Neon PostgreSQL
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  AGENT
+  CUSTOMER
+  ADMIN
+}
+
+enum SessionStatus {
+  WAITING
+  ACTIVE
+  ENDED
+}
+
+enum RecordingStatus {
+  RECORDING
+  PROCESSING
+  READY
+  FAILED
+}
+
+enum MessageType {
+  TEXT
+  FILE
+}
+
+model User {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         Role     @default(CUSTOMER)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Relations
+  agentSessions    Session[]      @relation("AgentSessions")
+  customerSessions Session[]      @relation("CustomerSessions")
+  messages         ChatMessage[]
+  events           SessionEvent[]
+
+  @@map("users")
+}
+
+model Session {
+  id          String        @id @default(cuid())
+  title       String
+  status      SessionStatus @default(WAITING)
+  inviteToken String        @unique @default(cuid())
+
+  agentId    String
+  agent      User    @relation("AgentSessions", fields: [agentId], references: [id])
+  customerId String?
+  customer   User?   @relation("CustomerSessions", fields: [customerId], references: [id])
+
+  createdAt DateTime  @default(now())
+  startedAt DateTime?
+  endedAt   DateTime?
+
+  // Relations
+  messages   ChatMessage[]
+  events     SessionEvent[]
+  recordings Recording[]
+
+  @@map("sessions")
+}
+
+model ChatMessage {
+  id        String      @id @default(cuid())
+  sessionId String
+  session   Session     @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  senderId  String
+  sender    User        @relation(fields: [senderId], references: [id])
+  content   String
+  type      MessageType @default(TEXT)
+  fileUrl   String?
+  fileName  String?
+  fileSize  Int?
+  createdAt DateTime    @default(now())
+
+  @@map("chat_messages")
+}
+
+model SessionEvent {
+  id        String   @id @default(cuid())
+  sessionId String
+  session   Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
+  event     String // JOINED, LEFT, MUTED, UNMUTED, VIDEO_ON, VIDEO_OFF, RECORDING_START, RECORDING_STOP
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  @@map("session_events")
+}
+
+model Recording {
+  id        String          @id @default(cuid())
+  sessionId String
+  session   Session         @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  status    RecordingStatus @default(RECORDING)
+  fileUrl   String?
+  fileSize  Int?
+  duration  Int? // in seconds
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+
+  @@map("recordings")
+}
