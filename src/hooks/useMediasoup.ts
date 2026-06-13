@@ -174,11 +174,18 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
 
       consumersRef.current.set(consumer.id, consumer);
 
+      // Resume the consumer FIRST so the track is live before we attach it to a video element
+      await emitAsync('resume-consumer', { sessionId: sessionIdRef.current, consumerId: consumer.id });
+
       setRemoteStreams((prev) => {
         const newMap = new Map(prev);
         const existing = newMap.get(peerSocketId);
         if (existing) {
-          existing.stream.addTrack(consumer.track);
+          // Only add track if not already present
+          const trackIds = existing.stream.getTracks().map((t) => t.id);
+          if (!trackIds.includes(consumer.track.id)) {
+            existing.stream.addTrack(consumer.track);
+          }
           newMap.set(peerSocketId, { ...existing });
         } else {
           const stream = new MediaStream([consumer.track]);
@@ -193,8 +200,6 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
         }
         return newMap;
       });
-
-      await emitAsync('resume-consumer', { sessionId: sessionIdRef.current, consumerId: consumer.id });
     } catch (err) {
       console.error('Failed to consume producer:', err);
     }

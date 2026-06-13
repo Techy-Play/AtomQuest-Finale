@@ -133,10 +133,14 @@ export default function SessionPage() {
     }
   };
 
-  // Attach local stream to video
+  // Attach local stream to video element and force play
   useEffect(() => {
-    if (localVideoRef.current && localStream) {
-      localVideoRef.current.srcObject = localStream;
+    const videoEl = localVideoRef.current;
+    if (videoEl && localStream) {
+      videoEl.srcObject = localStream;
+      videoEl.play().catch(() => {
+        // Autoplay policy: will play when user interacts
+      });
     }
   }, [localStream]);
 
@@ -184,23 +188,27 @@ export default function SessionPage() {
     router.push(user?.role === 'AGENT' || user?.role === 'ADMIN' ? '/agent' : '/customer');
   };
 
-  // Set remote video ref
+  // Set remote video ref — attach stream immediately when element mounts
   const setRemoteVideoRef = useCallback((peerId: string) => (el: HTMLVideoElement | null) => {
     if (el) {
       remoteVideoRefs.current.set(peerId, el);
       const remote = remoteStreams.get(peerId);
-      if (remote) {
+      if (remote && el.srcObject !== remote.stream) {
         el.srcObject = remote.stream;
+        el.play().catch(() => {});
       }
+    } else {
+      remoteVideoRefs.current.delete(peerId);
     }
   }, [remoteStreams]);
 
-  // Update remote video elements
+  // Sync remote streams → video elements whenever remoteStreams changes
   useEffect(() => {
     remoteStreams.forEach((remote, peerId) => {
       const videoEl = remoteVideoRefs.current.get(peerId);
       if (videoEl && videoEl.srcObject !== remote.stream) {
         videoEl.srcObject = remote.stream;
+        videoEl.play().catch(() => {});
       }
     });
   }, [remoteStreams]);
@@ -422,8 +430,7 @@ export default function SessionPage() {
                 autoPlay
                 playsInline
                 muted
-                className="w-full h-full object-cover"
-                style={{ transform: 'scaleX(-1)' }}
+                className="w-full h-full object-cover rounded-xl"
               />
               <div className="absolute bottom-2 left-2">
                 <Badge variant="secondary" className="bg-black/60 backdrop-blur-sm text-white border-0 text-xs">
