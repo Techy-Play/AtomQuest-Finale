@@ -277,7 +277,7 @@ export default function AgentDashboard() {
                                 <span className="text-amber-400">Awaiting customer</span>
                               )}
                               <Separator orientation="vertical" className="h-3" />
-                              <span>{session._count.messages} messages</span>
+                              <span>{session._count?.messages ?? 0} messages</span>
                               {session.startedAt && (
                                 <>
                                   <Separator orientation="vertical" className="h-3" />
@@ -285,6 +285,15 @@ export default function AgentDashboard() {
                                 </>
                               )}
                             </div>
+                            {/* Invite Token — shown so customer can use it */}
+                            {session.status !== 'ENDED' && (
+                              <div className="flex items-center gap-2 mt-1">
+                                <span className="text-xs text-muted-foreground">Token:</span>
+                                <code className="text-xs font-mono bg-muted/40 px-2 py-0.5 rounded text-primary select-all">
+                                  {session.inviteToken}
+                                </code>
+                              </div>
+                            )}
                           </div>
                           <div className="flex items-center gap-2 shrink-0">
                             <Button

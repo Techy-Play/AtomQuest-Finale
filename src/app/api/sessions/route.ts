@@ -73,6 +73,8 @@ export async function POST(req: NextRequest) {
       },
       include: {
         agent: { select: { id: true, name: true, email: true } },
+        customer: { select: { id: true, name: true, email: true } },
+        _count: { select: { messages: true, events: true } },
       },
     });
 
