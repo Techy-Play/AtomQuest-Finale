@@ -25,18 +25,19 @@ interface UseMediasoupOptions {
 }
 
 export function useMediasoup({ sessionId, userId, userName, userRole, onSessionEnded }: UseMediasoupOptions) {
-  const socketRef           = useRef<Socket | null>(null);
-  const deviceRef           = useRef<Device | null>(null);
-  const sendTransportRef    = useRef<Transport | null>(null);
-  const recvTransportRef    = useRef<Transport | null>(null);
-  const audioProducerRef    = useRef<Producer | null>(null);
-  const videoProducerRef    = useRef<Producer | null>(null);
-  const consumersRef        = useRef<Map<string, Consumer>>(new Map());
-  const localStreamRef      = useRef<MediaStream | null>(null);
-  // Track which socket the send transport was created for.
-  // If the socket reconnects (new socket.id), the server no longer knows
-  // the old transport, so we must create a fresh one.
+  const socketRef             = useRef<Socket | null>(null);
+  const deviceRef             = useRef<Device | null>(null);
+  const sendTransportRef      = useRef<Transport | null>(null);
+  const recvTransportRef      = useRef<Transport | null>(null);
+  const audioProducerRef      = useRef<Producer | null>(null);
+  const videoProducerRef      = useRef<Producer | null>(null);
+  const consumersRef          = useRef<Map<string, Consumer>>(new Map());
+  const localStreamRef        = useRef<MediaStream | null>(null);
   const sendTransportSocketId = useRef<string | null>(null);
+  // Lock to prevent concurrent startVoice/startVideo calls (React re-renders can cause duplicates)
+  const isStartingMediaRef    = useRef(false);
+  // Mirror of peers state for use in socket event handlers (avoids stale closure)
+  const peersRef              = useRef<PeerInfo[]>([]);
 
   const onSessionEndedRef = useRef(onSessionEnded);
   const sessionIdRef = useRef(sessionId);
@@ -64,6 +65,9 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
   const [incomingVideoRequest, setIncomingVideoRequest] = useState(false);
   const [videoRequestPending,  setVideoRequestPending]  = useState(false);
   const [facingMode,           setFacingMode]           = useState<'user' | 'environment'>('user');
+
+  // Keep peersRef in sync with peers state so socket event handlers always see current peers
+  useEffect(() => { peersRef.current = peers; }, [peers]);
 
   // --------------------------------------------------------------------------
   // Helpers
@@ -201,11 +205,9 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
     });
     socket.on('new-producer', ({ producerId, socketId, kind }: { producerId: string; socketId: string; kind: string }) => {
       console.log('[ConnectDesk] New producer from', socketId, 'kind:', kind);
-      setPeers((cp) => {
-        const peer = cp.find((p) => p.socketId === socketId);
-        consumeProducer(producerId, socketId, peer?.name, peer?.role);
-        return cp;
-      });
+      // IMPORTANT: do NOT call async functions inside setPeers - read from ref instead
+      const peer = peersRef.current.find((p) => p.socketId === socketId);
+      consumeProducer(producerId, socketId, peer?.name, peer?.role);
     });
     socket.on('producer-closed', ({ producerId }: { producerId: string }) => {
       consumersRef.current.forEach((c, cid) => {
@@ -330,6 +332,11 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
       setMediaWarning('Not connected. Please wait or refresh the page.');
       return;
     }
+    if (isStartingMediaRef.current) {
+      console.log('[ConnectDesk] startVoice: already starting media, ignoring duplicate call');
+      return;
+    }
+    isStartingMediaRef.current = true;
     setMediaWarning(null);
     let stream: MediaStream;
     try {
@@ -358,6 +365,8 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
     } catch (e: any) {
       console.error('[ConnectDesk] startVoice error:', e);
       setMediaWarning('Failed to start voice: ' + e.message);
+    } finally {
+      isStartingMediaRef.current = false;
     }
   }, [getOrCreateSendTransport]);
 
@@ -370,6 +379,11 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
       setMediaWarning('Not connected. Please wait or refresh the page.');
       return;
     }
+    if (isStartingMediaRef.current) {
+      console.log('[ConnectDesk] startVideo: already starting media, ignoring duplicate call');
+      return;
+    }
+    isStartingMediaRef.current = true;
     setMediaWarning(null);
     let stream: MediaStream;
     try {
@@ -420,6 +434,8 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
     } catch (e: any) {
       console.error('[ConnectDesk] startVideo error:', e);
       setMediaWarning('Failed to start video: ' + e.message);
+    } finally {
+      isStartingMediaRef.current = false;
     }
   }, [getOrCreateSendTransport]);
 

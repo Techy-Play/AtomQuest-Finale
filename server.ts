@@ -17,11 +17,21 @@ import type {
 const port = parseInt(process.env.SOCKET_PORT || '3001', 10);
 
 // Known virtual/software adapter name fragments to skip.
-// We want the real WiFi/Ethernet IP, not VirtualBox / VMware / Hyper-V.
 const VIRTUAL_ADAPTER_PATTERNS = [
   'vethernet', 'virtualbox', 'vmware', 'vmnet', 'vbox',
   'hyper-v', 'hyperv', 'loopback', 'pseudo', 'tunnel',
-  'isatap', 'teredo', '6to4', 'bluetooth',
+  'isatap', 'teredo', '6to4', 'bluetooth', 'virtual',
+  'host-only', 'nat network', 'internal network',
+];
+
+// IP ranges typically used by virtual adapters — skip these.
+const VIRTUAL_IP_PREFIXES = [
+  '192.168.56.', // VirtualBox host-only default
+  '192.168.99.', // Docker/VirtualBox NAT
+  '10.0.2.',     // VirtualBox NAT
+  '172.17.',     // Docker bridge
+  '172.18.',     // Docker bridge
+  '172.19.',     // Docker bridge
 ];
 
 function isVirtualAdapter(name: string): boolean {
@@ -29,21 +39,32 @@ function isVirtualAdapter(name: string): boolean {
   return VIRTUAL_ADAPTER_PATTERNS.some((p) => lower.includes(p));
 }
 
+function isVirtualIp(addr: string): boolean {
+  return VIRTUAL_IP_PREFIXES.some((p) => addr.startsWith(p));
+}
+
 // Auto-detect LAN IP for mediasoup ICE candidate announcement.
-// Prefers WiFi/Ethernet over virtual adapters.
+// Use MEDIASOUP_ANNOUNCED_IP env var to override if auto-detection picks wrong adapter.
 function getLanIp(): string {
   if (process.env.MEDIASOUP_ANNOUNCED_IP) return process.env.MEDIASOUP_ANNOUNCED_IP;
   const nets = networkInterfaces();
 
-  // First pass: prefer non-virtual adapters
+  // First pass: prefer non-virtual adapters with non-virtual IPs
   for (const name of Object.keys(nets)) {
     if (isVirtualAdapter(name)) continue;
     for (const net of nets[name] ?? []) {
-      if (net.family === 'IPv4' && !net.internal) return net.address;
+      if (net.family === 'IPv4' && !net.internal && !isVirtualIp(net.address)) return net.address;
     }
   }
 
-  // Second pass: fall back to any non-internal IPv4 (including virtual)
+  // Second pass: any non-internal, non-virtual-IP (even if adapter name looks virtual)
+  for (const name of Object.keys(nets)) {
+    for (const net of nets[name] ?? []) {
+      if (net.family === 'IPv4' && !net.internal && !isVirtualIp(net.address)) return net.address;
+    }
+  }
+
+  // Last resort
   for (const name of Object.keys(nets)) {
     for (const net of nets[name] ?? []) {
       if (net.family === 'IPv4' && !net.internal) return net.address;
