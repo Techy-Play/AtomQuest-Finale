@@ -141,13 +141,14 @@ async function getOrCreateRoom(sessionId: string): Promise<Room> {
 async function createWebRtcTransport(router: Router): Promise<WebRtcTransport> {
   return router.createWebRtcTransport({
     listenInfos: [
-      // Announce our LAN IP so mobile clients receive a reachable ICE candidate
+      // UDP first (lower latency), TCP fallback for firewalled networks
       { protocol: 'udp', ip: '0.0.0.0', announcedAddress: LAN_IP },
       { protocol: 'tcp', ip: '0.0.0.0', announcedAddress: LAN_IP },
     ],
     enableUdp: true,
     enableTcp: true,
     preferUdp: true,
+    enableSctp: false,
     initialAvailableOutgoingBitrate: 1000000,
   });
 }
@@ -234,21 +235,22 @@ async function main() {
 
     socket.on('connect-transport', async (data: { sessionId: string; transportId: string; dtlsParameters: any }, cb) => {
       try {
-        const room = rooms.get(data.sessionId);
-        const peer = room?.peers.get(socket.id);
+        const peer = rooms.get(data.sessionId)?.peers.get(socket.id);
         if (!peer) {
-          console.warn(`⚠️ connect-transport: peer ${socket.id} not found in room ${data.sessionId}`);
+          console.warn(`[SFU] connect-transport: peer ${socket.id} not found`);
           return cb({ error: 'Peer not found' });
         }
         const transport = peer.transports.get(data.transportId);
         if (!transport) {
-          console.warn(`⚠️ connect-transport: transport ${data.transportId} not found for peer ${socket.id}. Has: [${Array.from(peer.transports.keys()).join(', ')}]`);
+          console.warn(`[SFU] connect-transport: transport ${data.transportId} not found. Has: [${Array.from(peer.transports.keys()).join(', ')}]`);
           return cb({ error: 'Transport not found' });
         }
+        console.log(`[SFU] connect-transport: peer=${socket.id} transport=${data.transportId}`);
         await transport.connect({ dtlsParameters: data.dtlsParameters });
+        console.log(`[SFU] connect-transport OK: ${data.transportId}`);
         cb({ connected: true });
       } catch (err) {
-        console.error('connect-transport error:', err);
+        console.error('[SFU] connect-transport error:', err);
         cb({ error: 'Failed to connect transport' });
       }
     });
@@ -257,21 +259,22 @@ async function main() {
       try {
         const peer = rooms.get(data.sessionId)?.peers.get(socket.id);
         if (!peer) {
-          console.warn(`⚠️ produce: peer ${socket.id} not found`);
+          console.warn(`[SFU] produce: peer ${socket.id} not found`);
           return cb({ error: 'Peer not found' });
         }
         const transport = peer.transports.get(data.transportId);
         if (!transport) {
-          console.warn(`⚠️ produce: transport ${data.transportId} not found for peer ${socket.id}`);
+          console.warn(`[SFU] produce: transport ${data.transportId} not found for peer ${socket.id}. Has: [${Array.from(peer.transports.keys()).join(', ')}]`);
           return cb({ error: 'Transport not found' });
         }
-
+        console.log(`[SFU] produce: peer=${socket.id} kind=${data.kind} transport=${data.transportId}`);
         const producer = await transport.produce({
           kind: data.kind as 'audio' | 'video',
           rtpParameters: data.rtpParameters,
           appData: data.appData,
         });
         peer.producers.set(producer.id, producer);
+        console.log(`[SFU] Producer created: ${producer.id} kind=${data.kind} peer=${socket.id}`);
 
         socket.to(data.sessionId).emit('new-producer', {
           producerId: producer.id, socketId: socket.id, kind: data.kind,
@@ -284,7 +287,7 @@ async function main() {
 
         cb({ id: producer.id });
       } catch (err) {
-        console.error('produce error:', err);
+        console.error('[SFU] produce error:', err);
         cb({ error: 'Failed to produce' });
       }
     });
