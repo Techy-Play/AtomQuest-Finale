@@ -60,6 +60,10 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
   const consumersRef      = useRef<Map<string, Consumer>>(new Map());
   const localStreamRef    = useRef<MediaStream | null>(null);
 
+  // Peers ref for synchronous access inside socket event handlers
+  // (avoids the async-inside-setState anti-pattern)
+  const peersRef          = useRef<PeerInfo[]>([]);
+
   const onSessionEndedRef = useRef(onSessionEnded);
   const sessionIdRef      = useRef(sessionId);
   const userIdRef         = useRef(userId);
@@ -86,6 +90,15 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
   const [incomingVideoRequest, setIncomingVideoRequest] = useState(false);
   const [videoRequestPending,  setVideoRequestPending]  = useState(false);
 
+  // Helper to update peers state + ref atomically
+  const updatePeers = useCallback((updater: (prev: PeerInfo[]) => PeerInfo[]) => {
+    setPeers((prev) => {
+      const next = updater(prev);
+      peersRef.current = next;
+      return next;
+    });
+  }, []);
+
   // -- emit helper ------------------------------------------------------------
 
   const emitAsync = useCallback((event: string, data: any): Promise<any> => {
@@ -101,7 +114,7 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
 
   // -- transports ------------------------------------------------------------
 
-  const createSendTransport = useCallback(async () => {
+  const createSendTransport = useCallback(async (): Promise<Transport> => {
     const device = deviceRef.current;
     if (!device) throw new Error('Device not loaded');
     const sid = sessionIdRef.current;
@@ -126,7 +139,7 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
     return t;
   }, [emitAsync]);
 
-  const createRecvTransport = useCallback(async () => {
+  const createRecvTransport = useCallback(async (): Promise<Transport> => {
     const device = deviceRef.current;
     if (!device) throw new Error('Device not loaded');
     const sid = sessionIdRef.current;
@@ -149,41 +162,61 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
 
   const consumeProducer = useCallback(async (producerId: string, peerSocketId: string, peerName?: string, peerRole?: string) => {
     const device = deviceRef.current;
-    if (!device) return;
+    if (!device) { console.warn('[ConnectDesk] consumeProducer: no device'); return; }
+
+    // Reuse existing recv transport or create a new one
     let transport = recvTransportRef.current;
     if (!transport || transport.closed) {
+      console.log('[ConnectDesk] Creating new recv transport');
       transport = await createRecvTransport();
     }
+
     try {
+      console.log('[ConnectDesk] Consuming producer:', producerId, 'from peer:', peerSocketId);
       const cd = await emitAsync('consume', {
         sessionId: sessionIdRef.current,
         transportId: transport.id,
         producerId,
         rtpCapabilities: device.rtpCapabilities,
       });
+
+      console.log('[ConnectDesk] Consumer data received:', cd.kind, cd.id);
+
       const consumer = await transport.consume({
         id: cd.id,
         producerId: cd.producerId,
         kind: cd.kind,
         rtpParameters: cd.rtpParameters,
       });
-      consumersRef.current.set(consumer.id, consumer);
-      // Resume immediately — server pauses by default
-      await emitAsync('resume-consumer', { sessionId: sessionIdRef.current, consumerId: consumer.id });
 
+      consumersRef.current.set(consumer.id, consumer);
+
+      // Resume consumer (server may have paused it)
+      await emitAsync('resume-consumer', { sessionId: sessionIdRef.current, consumerId: consumer.id });
+      console.log('[ConnectDesk] Consumer resumed, track:', consumer.track.kind, 'readyState:', consumer.track.readyState);
+
+      // Add track to remote stream
       setRemoteStreams((prev) => {
         const m = new Map(prev);
         const ex = m.get(peerSocketId);
         if (ex) {
-          const ids = ex.stream.getTracks().map((t) => t.id);
-          if (!ids.includes(consumer.track.id)) ex.stream.addTrack(consumer.track);
-          m.set(peerSocketId, { ...ex, peerName: peerName || ex.peerName, peerRole: peerRole || ex.peerRole });
+          // Add track to existing stream if not already there
+          const existingIds = ex.stream.getTracks().map((t) => t.id);
+          if (!existingIds.includes(consumer.track.id)) {
+            ex.stream.addTrack(consumer.track);
+          }
+          m.set(peerSocketId, {
+            ...ex,
+            peerName: peerName || ex.peerName,
+            peerRole: peerRole || ex.peerRole,
+          });
         } else {
+          const stream = new MediaStream([consumer.track]);
           m.set(peerSocketId, {
             peerId: peerSocketId,
             peerName: peerName || 'Participant',
             peerRole: peerRole || 'CUSTOMER',
-            stream: new MediaStream([consumer.track]),
+            stream,
             audioEnabled: true,
             videoEnabled: true,
           });
@@ -191,32 +224,32 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
         return m;
       });
     } catch (err) {
-      console.error('[ConnectDesk] consumeProducer error:', err);
+      console.error('[ConnectDesk] consumeProducer failed:', err);
     }
   }, [emitAsync, createRecvTransport]);
 
   // -- socket events ---------------------------------------------------------
 
   const registerSocketEvents = useCallback((socket: Socket) => {
+
     socket.on('peer-joined', (peer: PeerInfo) => {
       console.log('[ConnectDesk] Peer joined:', peer.name, peer.role);
-      setPeers((p) => [...p.filter((x) => x.socketId !== peer.socketId), peer]);
+      updatePeers((p) => [...p.filter((x) => x.socketId !== peer.socketId), peer]);
     });
 
     socket.on('peer-left', ({ socketId }: { socketId: string }) => {
       console.log('[ConnectDesk] Peer left:', socketId);
-      setPeers((p) => p.filter((x) => x.socketId !== socketId));
+      updatePeers((p) => p.filter((x) => x.socketId !== socketId));
       setRemoteStreams((p) => { const m = new Map(p); m.delete(socketId); return m; });
     });
 
-    socket.on('new-producer', async ({ producerId, socketId, kind }: { producerId: string; socketId: string; kind: string }) => {
-      console.log('[ConnectDesk] New producer from', socketId, 'kind:', kind);
-      // Find peer name/role from peers list
-      setPeers((cp) => {
-        const peer = cp.find((p) => p.socketId === socketId);
-        consumeProducer(producerId, socketId, peer?.name, peer?.role);
-        return cp;
-      });
+    // *** CRITICAL FIX: Do NOT call consumeProducer inside setPeers ***
+    // Use peersRef (synchronous) to look up peer info, then call consumeProducer directly
+    socket.on('new-producer', ({ producerId, socketId, kind }: { producerId: string; socketId: string; kind: string }) => {
+      console.log('[ConnectDesk] new-producer event:', kind, 'from', socketId);
+      const peer = peersRef.current.find((p) => p.socketId === socketId);
+      // Call consumeProducer directly — NOT inside a state updater
+      consumeProducer(producerId, socketId, peer?.name, peer?.role);
     });
 
     socket.on('producer-closed', ({ producerId }: { producerId: string }) => {
@@ -250,7 +283,6 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
     });
 
     socket.on('session-ended', () => onSessionEndedRef.current?.());
-
     socket.on('video-request', () => setIncomingVideoRequest(true));
     socket.on('video-request-accepted', () => setVideoRequestPending(false));
     socket.on('video-request-declined', () => {
@@ -258,26 +290,26 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
       setMediaWarning('Customer declined the video request.');
     });
 
-    // Handle socket disconnect gracefully
     socket.on('disconnect', (reason) => {
-      console.log('[ConnectDesk] Socket disconnected:', reason);
+      console.log('[ConnectDesk] Disconnected:', reason);
       setIsConnected(false);
     });
-  }, [consumeProducer]);
+
+  }, [consumeProducer, updatePeers]);
 
   // -------------------------------------------------------------------------
-  // TIER 1 — connect() — socket + room join, NO media permissions
+  // TIER 1 — connect() — socket + room join, NO media
   // -------------------------------------------------------------------------
 
   const connect = useCallback(async () => {
     if (socketRef.current?.connected) return;
     setIsConnecting(true);
     setError(null);
+
     try {
       const socketHost = window.location.hostname;
       const url = process.env.NEXT_PUBLIC_SOCKET_URL || `${window.location.protocol}//${socketHost}:3001`;
-
-      console.log('[ConnectDesk] Connecting to:', url, '| Session:', sessionIdRef.current, '| Role:', userRoleRef.current);
+      console.log('[ConnectDesk] Connecting to:', url);
 
       const socket = io(url, {
         path: '/socket.io',
@@ -290,25 +322,21 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
       });
       socketRef.current = socket;
 
-      // Wait for connection
       await new Promise<void>((resolve, reject) => {
         const t = setTimeout(() => {
           socket.disconnect();
-          reject(new Error(
-            `Connection timed out.\nMake sure both servers are running:\n  npm run dev:all\nTried: ${url}`
-          ));
+          reject(new Error(`Connection timed out. Make sure the SFU server is running:\n  npm run dev:all\nTried: ${url}`));
         }, 10000);
         socket.on('connect', () => { clearTimeout(t); resolve(); });
         socket.on('connect_error', (err) => {
           clearTimeout(t);
           socket.disconnect();
-          reject(new Error(`Cannot reach SFU at ${url}.\nRun: npm run dev:server\nDetail: ${err.message}`));
+          reject(new Error(`Cannot reach SFU at ${url}\nRun: npm run dev:all\nDetail: ${err.message}`));
         });
       });
 
       console.log('[ConnectDesk] Socket connected:', socket.id);
 
-      // Join the mediasoup room
       const joinData = await emitAsync('join-room', {
         sessionId: sessionIdRef.current,
         userId: userIdRef.current,
@@ -316,19 +344,21 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
         role: userRoleRef.current,
       });
 
-      console.log('[ConnectDesk] Joined room, existing peers:', joinData.existingPeers?.length ?? 0);
+      console.log('[ConnectDesk] Joined room. Existing peers:', joinData.existingPeers?.length ?? 0);
 
-      // Load mediasoup device with server RTP capabilities
       const device = new mediasoupClient.Device();
       await device.load({ routerRtpCapabilities: joinData.routerRtpCapabilities });
       deviceRef.current = device;
 
-      // Create recv transport for consuming remote streams
+      // Create recv transport so we can consume others' streams
       await createRecvTransport();
 
-      // Consume any producers that already exist in the room
+      // Consume existing producers
       const existingPeers: PeerInfo[] = joinData.existingPeers || [];
+      // Update ref first so registerSocketEvents can use it
+      peersRef.current = existingPeers;
       setPeers(existingPeers);
+
       for (const peer of existingPeers) {
         if (peer.producers && peer.producers.length > 0) {
           for (const prod of peer.producers) {
@@ -337,14 +367,16 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
         }
       }
 
+      // Register all socket events AFTER initial setup
       registerSocketEvents(socket);
+
       setIsConnected(true);
       setSupportMode('chat');
+      console.log('[ConnectDesk] Ready in chat mode.');
 
-      console.log('[ConnectDesk] Ready. Mode: chat');
     } catch (err: any) {
-      console.error('[ConnectDesk] Connect error:', err.message);
-      setError(err.message || 'Failed to connect to session');
+      console.error('[ConnectDesk] Connect failed:', err.message);
+      setError(err.message || 'Failed to connect');
       socketRef.current?.disconnect();
       socketRef.current = null;
     } finally {
@@ -353,28 +385,34 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
   }, [emitAsync, createRecvTransport, consumeProducer, registerSocketEvents]);
 
   // -------------------------------------------------------------------------
-  // TIER 2 — startVoice() — microphone only
+  // TIER 2 — startVoice() — microphone
   // -------------------------------------------------------------------------
 
   const startVoice = useCallback(async () => {
-    if (!deviceRef.current) { setMediaWarning('Not connected to session yet.'); return; }
+    if (!deviceRef.current) { setMediaWarning('Not connected yet.'); return; }
     if (!socketRef.current?.connected) { setMediaWarning('Connection lost. Please refresh.'); return; }
     setMediaWarning(null);
 
+    console.log('[ConnectDesk] Requesting microphone...');
     let stream: MediaStream;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true }, video: false });
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 48000 },
+        video: false,
+      });
     } catch (err: any) {
       const msg =
         err.name === 'NotAllowedError'  ? 'Microphone permission denied. You can still use chat.' :
         err.name === 'NotFoundError'    ? 'No microphone found. You can still use chat.' :
         err.name === 'NotReadableError' ? 'Microphone is in use by another app.' :
-                                          'Could not access microphone. You can still use chat.';
+                                          `Microphone error: ${err.message}`;
+      console.error('[ConnectDesk] getUserMedia audio error:', err);
       setMediaWarning(msg);
       return;
     }
 
-    // Merge with existing local stream, or create new
+    console.log('[ConnectDesk] Got audio stream, tracks:', stream.getAudioTracks().length);
+
     if (localStreamRef.current) {
       stream.getAudioTracks().forEach((t) => localStreamRef.current!.addTrack(t));
     } else {
@@ -383,21 +421,30 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
     }
 
     try {
-      // Create send transport if not exists
       let st = sendTransportRef.current;
-      if (!st || st.closed) st = await createSendTransport();
+      if (!st || st.closed) {
+        console.log('[ConnectDesk] Creating send transport for voice...');
+        st = await createSendTransport();
+      }
 
       const audioTrack = stream.getAudioTracks()[0];
       if (audioTrack && !audioProducerRef.current) {
-        audioProducerRef.current = await st.produce({ track: audioTrack, appData: { mediaType: 'audio' } });
-        console.log('[ConnectDesk] Audio producer created:', audioProducerRef.current.id);
+        console.log('[ConnectDesk] Producing audio track...');
+        audioProducerRef.current = await st.produce({
+          track: audioTrack,
+          appData: { mediaType: 'audio' },
+        });
+        console.log('[ConnectDesk] Audio producer ID:', audioProducerRef.current.id);
       }
+
       setIsAudioEnabled(true);
       setSupportMode('voice');
-      socketRef.current?.emit('media-state-change', { sessionId: sessionIdRef.current, kind: 'audio', enabled: true });
+      socketRef.current?.emit('media-state-change', {
+        sessionId: sessionIdRef.current, kind: 'audio', enabled: true,
+      });
     } catch (e: any) {
-      console.error('[ConnectDesk] startVoice error:', e);
-      setMediaWarning('Failed to start voice. You can still use chat.');
+      console.error('[ConnectDesk] startVoice produce error:', e);
+      setMediaWarning(`Voice failed: ${e.message}`);
     }
   }, [createSendTransport]);
 
@@ -406,27 +453,31 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
   // -------------------------------------------------------------------------
 
   const startVideo = useCallback(async () => {
-    if (!deviceRef.current) { setMediaWarning('Not connected to session yet.'); return; }
+    if (!deviceRef.current) { setMediaWarning('Not connected yet.'); return; }
     if (!socketRef.current?.connected) { setMediaWarning('Connection lost. Please refresh.'); return; }
     setMediaWarning(null);
 
+    console.log('[ConnectDesk] Requesting camera + mic...');
     let stream: MediaStream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true },
+        audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 48000 },
         video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
       });
     } catch (err: any) {
       const msg =
-        err.name === 'NotAllowedError'  ? 'Camera/mic permission denied. You can still use voice/chat.' :
-        err.name === 'NotFoundError'    ? 'No camera found. You can still use voice/chat.' :
-        err.name === 'NotReadableError' ? 'Camera is in use by another app.' :
-                                          'Could not access camera. You can still use voice/chat.';
+        err.name === 'NotAllowedError'  ? 'Camera/mic permission denied.' :
+        err.name === 'NotFoundError'    ? 'No camera found. Using chat.' :
+        err.name === 'NotReadableError' ? 'Camera/mic in use by another app.' :
+                                          `Camera error: ${err.message}`;
+      console.error('[ConnectDesk] getUserMedia video error:', err);
       setMediaWarning(msg);
       return;
     }
 
-    // Stop previous tracks
+    console.log('[ConnectDesk] Got stream, video tracks:', stream.getVideoTracks().length, 'audio tracks:', stream.getAudioTracks().length);
+
+    // Stop old tracks
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((t) => t.stop());
     }
@@ -435,41 +486,48 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
 
     try {
       let st = sendTransportRef.current;
-      if (!st || st.closed) st = await createSendTransport();
+      if (!st || st.closed) {
+        console.log('[ConnectDesk] Creating send transport for video...');
+        st = await createSendTransport();
+      }
 
-      // Close existing producers before creating new ones
+      // Close old producers
       if (audioProducerRef.current) { audioProducerRef.current.close(); audioProducerRef.current = null; }
       if (videoProducerRef.current) { videoProducerRef.current.close(); videoProducerRef.current = null; }
 
       const audioTrack = stream.getAudioTracks()[0];
       if (audioTrack) {
-        audioProducerRef.current = await st.produce({ track: audioTrack, appData: { mediaType: 'audio' } });
-        console.log('[ConnectDesk] Audio producer created:', audioProducerRef.current.id);
+        console.log('[ConnectDesk] Producing audio...');
+        audioProducerRef.current = await st.produce({
+          track: audioTrack,
+          appData: { mediaType: 'audio' },
+        });
+        console.log('[ConnectDesk] Audio producer:', audioProducerRef.current.id);
       }
 
       const videoTrack = stream.getVideoTracks()[0];
       if (videoTrack) {
+        console.log('[ConnectDesk] Producing video...');
         videoProducerRef.current = await st.produce({
           track: videoTrack,
           appData: { mediaType: 'video' },
-          encodings: [
-            { rid: 'r0', maxBitrate: 100000, scalabilityMode: 'S1T3' },
-            { rid: 'r1', maxBitrate: 300000, scalabilityMode: 'S1T3' },
-            { rid: 'r2', maxBitrate: 900000, scalabilityMode: 'S1T3' },
-          ],
           codecOptions: { videoGoogleStartBitrate: 1000 },
         });
-        console.log('[ConnectDesk] Video producer created:', videoProducerRef.current.id);
+        console.log('[ConnectDesk] Video producer:', videoProducerRef.current.id);
       }
 
       setIsAudioEnabled(true);
       setIsVideoEnabled(true);
       setSupportMode('video');
-      socketRef.current?.emit('media-state-change', { sessionId: sessionIdRef.current, kind: 'audio', enabled: true });
-      socketRef.current?.emit('media-state-change', { sessionId: sessionIdRef.current, kind: 'video', enabled: true });
+      socketRef.current?.emit('media-state-change', {
+        sessionId: sessionIdRef.current, kind: 'audio', enabled: true,
+      });
+      socketRef.current?.emit('media-state-change', {
+        sessionId: sessionIdRef.current, kind: 'video', enabled: true,
+      });
     } catch (e: any) {
-      console.error('[ConnectDesk] startVideo error:', e);
-      setMediaWarning('Failed to start video. You can still use voice/chat.');
+      console.error('[ConnectDesk] startVideo produce error:', e);
+      setMediaWarning(`Video failed: ${e.message}`);
     }
   }, [createSendTransport]);
 
@@ -509,7 +567,7 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
   }, []);
 
   // -------------------------------------------------------------------------
-  // Video escalation requests
+  // Video escalation
   // -------------------------------------------------------------------------
 
   const requestCustomerVideo = useCallback(() => {
@@ -528,7 +586,13 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
   // Chat
   // -------------------------------------------------------------------------
 
-  const sendMessage = useCallback(async (content: string, type: 'TEXT' | 'FILE' = 'TEXT', fileUrl?: string, fileName?: string, fileSize?: number) => {
+  const sendMessage = useCallback(async (
+    content: string,
+    type: 'TEXT' | 'FILE' = 'TEXT',
+    fileUrl?: string,
+    fileName?: string,
+    fileSize?: number,
+  ) => {
     const sid = sessionIdRef.current;
     const msg: ChatMsg = {
       id: crypto.randomUUID(),
@@ -550,7 +614,7 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
   }, []);
 
   // -------------------------------------------------------------------------
-  // Session management
+  // Session
   // -------------------------------------------------------------------------
 
   const endSession = useCallback(async () => {
@@ -574,6 +638,7 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
     socketRef.current?.disconnect();
     socketRef.current = null;
     deviceRef.current = null;
+    peersRef.current = [];
     setIsConnected(false);
     setRemoteStreams(new Map());
     setPeers([]);
@@ -588,7 +653,6 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
     return () => {
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach((t) => t.stop());
-        localStreamRef.current = null;
       }
       sendTransportRef.current?.close();
       recvTransportRef.current?.close();

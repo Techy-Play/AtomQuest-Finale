@@ -6,11 +6,10 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useMediasoup } from '@/hooks/useMediasoup';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import { ThemeToggle } from '@/components/theme-toggle';
 import {
   Paperclip, X, Mic, MicOff, Video, VideoOff,
-  PhoneOff, MessageSquare, PhoneCall, ChevronDown,
+  PhoneOff, MessageSquare, PhoneCall,
 } from 'lucide-react';
 
 type RecordingStatus = 'idle' | 'recording' | 'processing' | 'ready' | 'failed';
@@ -540,7 +539,7 @@ export default function SessionPage() {
 
         {/* ── CHAT PANEL ────────────────────────────────────────────────────── */}
         {chatOpen && (
-          <aside className="w-72 sm:w-80 flex flex-col border-l border-border bg-card shrink-0 overflow-hidden">
+          <aside className="w-72 sm:w-80 flex flex-col border-l border-border bg-card shrink-0" style={{minHeight:0}}>
 
             {/* Chat header */}
             <div className="flex items-center justify-between px-3 py-2 border-b border-border shrink-0">
@@ -556,8 +555,8 @@ export default function SessionPage() {
               </button>
             </div>
 
-            {/* Messages */}
-            <ScrollArea className="flex-1">
+            {/* Messages — plain div with overflow-y-auto guarantees scrollability */}
+            <div className="flex-1 overflow-y-auto min-h-0" style={{overflowY:'auto'}}>
               <div className="p-3 space-y-3">
                 {chatMessages.length === 0 ? (
                   <div className="text-center py-10 text-xs text-muted-foreground">
@@ -574,26 +573,37 @@ export default function SessionPage() {
                       <div key={msg.id} className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
                         <div className="flex items-center gap-1 mb-0.5">
                           <span className="text-[10px] font-medium text-muted-foreground">{isMe ? 'You' : msg.senderName}</span>
-                          <span className={`text-[9px] px-1 rounded font-medium ${msg.senderRole === 'AGENT' ? 'bg-blue-500/15 text-blue-400' : 'bg-emerald-500/15 text-emerald-400'}`}>
-                            {msg.senderRole}
-                          </span>
+                          <span className={`text-[9px] px-1.5 py-0 rounded font-medium ${
+                            msg.senderRole === 'AGENT' || msg.senderRole === 'ADMIN'
+                              ? 'bg-blue-500/15 text-blue-400'
+                              : 'bg-emerald-500/15 text-emerald-400'
+                          }`}>{msg.senderRole}</span>
                         </div>
                         <div className={`rounded-2xl overflow-hidden text-sm max-w-[90%] ${
-                          isMe ? 'bg-primary text-primary-foreground rounded-br-sm' : 'bg-muted rounded-bl-sm'
+                          isMe
+                            ? 'bg-primary text-primary-foreground rounded-br-sm'
+                            : 'bg-muted rounded-bl-sm'
                         }`}>
                           {msg.type === 'FILE' && msg.fileUrl ? (
                             isImage ? (
                               <a href={msg.fileUrl} target="_blank" rel="noopener noreferrer">
-                                <img src={msg.fileUrl} alt={msg.fileName || 'Image'}
+                                <img
+                                  src={msg.fileUrl}
+                                  alt={msg.fileName || 'Image'}
                                   className="max-w-full object-cover max-h-44 w-full block"
                                   onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
                                 />
                               </a>
                             ) : (
-                              <a href={isPdf ? `https://docs.google.com/viewer?url=${encodeURIComponent(msg.fileUrl)}` : msg.fileUrl}
-                                target="_blank" rel="noopener noreferrer"
-                                className={`flex items-center gap-2 px-3 py-2.5 ${isMe ? '' : ''}`}>
-                                <span className="text-base">{isPdf ? '📄' : '📎'}</span>
+                              <a
+                                href={isPdf
+                                  ? `https://docs.google.com/viewer?url=${encodeURIComponent(msg.fileUrl)}`
+                                  : msg.fileUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="flex items-center gap-2 px-3 py-2.5 hover:opacity-80 transition-opacity"
+                              >
+                                <span className="text-base shrink-0">{isPdf ? '📄' : '📎'}</span>
                                 <span className="text-xs underline truncate max-w-[140px]">{msg.fileName || 'File'}</span>
                               </a>
                             )
@@ -610,7 +620,7 @@ export default function SessionPage() {
                 )}
                 <div ref={chatEndRef} />
               </div>
-            </ScrollArea>
+            </div>
 
             {/* Upload error */}
             {uploadError && (
