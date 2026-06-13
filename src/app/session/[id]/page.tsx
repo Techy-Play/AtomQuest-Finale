@@ -485,12 +485,13 @@ export default function SessionPage() {
             </div>
           )}
 
-          {/* ── CONTROLS BAR ─────────────────────────────────────────────── */}
+          {/* CONTROLS BAR */}
           <div className="flex items-center justify-center gap-2 py-3 px-4 bg-card border-t border-border shrink-0">
-            {/* Mute button — voice/video only */}
+
+            {/* Mute toggle - both agent and customer when in voice/video */}
             {supportMode !== 'chat' && (
               <button onClick={toggleAudio}
-                title={isAudioEnabled ? 'Mute' : 'Unmute'}
+                title={isAudioEnabled ? 'Mute microphone' : 'Unmute microphone'}
                 className={`w-11 h-11 rounded-full flex items-center justify-center transition-all active:scale-95 shadow-md ${
                   isAudioEnabled ? 'bg-secondary text-secondary-foreground' : 'bg-red-600 text-white'
                 }`}>
@@ -498,10 +499,10 @@ export default function SessionPage() {
               </button>
             )}
 
-            {/* Camera button — video only */}
+            {/* Camera toggle - both agent and customer when in video mode */}
             {supportMode === 'video' && (
               <button onClick={toggleVideo}
-                title={isVideoEnabled ? 'Camera off' : 'Camera on'}
+                title={isVideoEnabled ? 'Turn camera off' : 'Turn camera on'}
                 className={`w-11 h-11 rounded-full flex items-center justify-center transition-all active:scale-95 shadow-md ${
                   isVideoEnabled ? 'bg-secondary text-secondary-foreground' : 'bg-red-600 text-white'
                 }`}>
@@ -509,31 +510,39 @@ export default function SessionPage() {
               </button>
             )}
 
-            {/* Voice button — chat mode only */}
-            {isConnected && supportMode === 'chat' && (
-              <button onClick={startVoice}
-                title="Start Voice"
-                className="w-11 h-11 rounded-full flex items-center justify-center bg-amber-500/15 border border-amber-500/40 text-amber-400 transition-all active:scale-95 hover:bg-amber-500/25 shadow-md">
-                <PhoneCall size={18} />
-              </button>
-            )}
-
-            {/* Stop media — return to chat */}
+            {/* Stop media (back to chat) - both when in voice/video */}
             {supportMode !== 'chat' && (
               <button onClick={stopMedia}
-                title="Stop media"
+                title="Stop audio/video"
                 className="w-11 h-11 rounded-full flex items-center justify-center bg-muted text-muted-foreground transition-all active:scale-95 hover:bg-muted/80 shadow-md">
                 <MicOff size={16} />
               </button>
             )}
 
-            {/* End Session — agent only. Customers cannot end or leave the session. */}
+            {/* Voice start - AGENT only in chat mode */}
+            {isAgent && isConnected && supportMode === 'chat' && (
+              <button onClick={startVoice}
+                title="Start Voice Support"
+                className="w-11 h-11 rounded-full flex items-center justify-center bg-amber-500/15 border border-amber-500/40 text-amber-400 transition-all active:scale-95 hover:bg-amber-500/25 shadow-md">
+                <PhoneCall size={18} />
+              </button>
+            )}
+
+            {/* End session - AGENT only (red prominent button) */}
             {isAgent && (
-              <button
-                onClick={handleEndCall}
-                title="End Session"
+              <button onClick={handleEndCall}
+                title="End Session for everyone"
                 className="w-14 h-11 rounded-full flex items-center justify-center bg-red-600 hover:bg-red-700 text-white shadow-lg transition-all active:scale-95">
                 <PhoneOff size={18} />
+              </button>
+            )}
+
+            {/* Leave - CUSTOMER only (subtle, no red button) */}
+            {!isAgent && (
+              <button onClick={handleLeaveCall}
+                title="Leave session"
+                className="px-4 h-9 rounded-full flex items-center justify-center gap-1.5 bg-muted text-muted-foreground hover:bg-muted/80 transition-all active:scale-95 text-xs font-medium shadow-md">
+                <PhoneOff size={14} /> Leave
               </button>
             )}
           </div>
@@ -541,7 +550,7 @@ export default function SessionPage() {
 
         {/* ── CHAT PANEL ────────────────────────────────────────────────────── */}
         {chatOpen && (
-          <aside className="w-72 sm:w-80 flex flex-col border-l border-border bg-card shrink-0" style={{minHeight:0}}>
+          <aside className="w-72 sm:w-80 flex flex-col border-l border-border bg-card shrink-0 overflow-hidden">
 
             {/* Chat header */}
             <div className="flex items-center justify-between px-3 py-2 border-b border-border shrink-0">
@@ -557,8 +566,8 @@ export default function SessionPage() {
               </button>
             </div>
 
-            {/* Messages — plain div with overflow-y-auto guarantees scrollability */}
-            <div className="flex-1 overflow-y-auto min-h-0" style={{overflowY:'auto'}}>
+            {/* Messages - scrollable area */}
+            <div className="flex-1 overflow-y-auto min-h-0">
               <div className="p-3 space-y-3">
                 {chatMessages.length === 0 ? (
                   <div className="text-center py-10 text-xs text-muted-foreground">
@@ -568,44 +577,34 @@ export default function SessionPage() {
                   </div>
                 ) : (
                   chatMessages.map((msg) => {
-                    const isMe    = msg.senderId === user?.userId;
-                    const isImage = msg.fileUrl && /\.(jpe?g|png|gif|webp)$/i.test(msg.fileUrl);
-                    const isPdf   = msg.fileUrl && (msg.fileUrl.includes('.pdf') || msg.type === 'FILE' && msg.fileName?.endsWith('.pdf'));
+                    const isMe  = msg.senderId === user?.userId;
+                    const isImg = msg.fileUrl && /\.(jpe?g|png|gif|webp)$/i.test(msg.fileUrl);
+                    const isPdf = msg.fileUrl && (msg.fileUrl.includes('.pdf') || (msg.type === 'FILE' && msg.fileName?.endsWith('.pdf')));
                     return (
                       <div key={msg.id} className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
                         <div className="flex items-center gap-1 mb-0.5">
                           <span className="text-[10px] font-medium text-muted-foreground">{isMe ? 'You' : msg.senderName}</span>
-                          <span className={`text-[9px] px-1.5 py-0 rounded font-medium ${
-                            msg.senderRole === 'AGENT' || msg.senderRole === 'ADMIN'
-                              ? 'bg-blue-500/15 text-blue-400'
-                              : 'bg-emerald-500/15 text-emerald-400'
+                          <span className={`text-[9px] px-1 rounded font-medium ${
+                            msg.senderRole === 'AGENT' ? 'bg-blue-500/15 text-blue-400' : 'bg-emerald-500/15 text-emerald-400'
                           }`}>{msg.senderRole}</span>
                         </div>
                         <div className={`rounded-2xl overflow-hidden text-sm max-w-[90%] ${
-                          isMe
-                            ? 'bg-primary text-primary-foreground rounded-br-sm'
-                            : 'bg-muted rounded-bl-sm'
+                          isMe ? 'bg-primary text-primary-foreground rounded-br-sm' : 'bg-muted rounded-bl-sm'
                         }`}>
                           {msg.type === 'FILE' && msg.fileUrl ? (
-                            isImage ? (
+                            isImg ? (
                               <a href={msg.fileUrl} target="_blank" rel="noopener noreferrer">
-                                <img
-                                  src={msg.fileUrl}
-                                  alt={msg.fileName || 'Image'}
+                                <img src={msg.fileUrl} alt={msg.fileName || 'Image'}
                                   className="max-w-full object-cover max-h-44 w-full block"
                                   onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
                                 />
                               </a>
                             ) : (
                               <a
-                                href={isPdf
-                                  ? `https://docs.google.com/viewer?url=${encodeURIComponent(msg.fileUrl)}`
-                                  : msg.fileUrl}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="flex items-center gap-2 px-3 py-2.5 hover:opacity-80 transition-opacity"
-                              >
-                                <span className="text-base shrink-0">{isPdf ? '📄' : '📎'}</span>
+                                href={isPdf ? `https://docs.google.com/viewer?url=${encodeURIComponent(msg.fileUrl)}` : msg.fileUrl}
+                                target="_blank" rel="noopener noreferrer"
+                                className="flex items-center gap-2 px-3 py-2.5">
+                                <span className="text-base">{isPdf ? '📄' : '📎'}</span>
                                 <span className="text-xs underline truncate max-w-[140px]">{msg.fileName || 'File'}</span>
                               </a>
                             )
@@ -622,7 +621,7 @@ export default function SessionPage() {
                 )}
                 <div ref={chatEndRef} />
               </div>
-            </div>
+            </ScrollArea>
 
             {/* Upload error */}
             {uploadError && (
