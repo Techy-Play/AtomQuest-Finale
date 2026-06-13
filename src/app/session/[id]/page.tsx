@@ -527,13 +527,15 @@ export default function SessionPage() {
               </button>
             )}
 
-            {/* End/Leave button */}
-            <button
-              onClick={isAgent ? handleEndCall : handleLeaveCall}
-              title={isAgent ? 'End Session' : 'Leave Session'}
-              className="w-14 h-11 rounded-full flex items-center justify-center bg-red-600 hover:bg-red-700 text-white shadow-lg transition-all active:scale-95">
-              <PhoneOff size={18} />
-            </button>
+            {/* End Session — agent only. Customers cannot end or leave the session. */}
+            {isAgent && (
+              <button
+                onClick={handleEndCall}
+                title="End Session"
+                className="w-14 h-11 rounded-full flex items-center justify-center bg-red-600 hover:bg-red-700 text-white shadow-lg transition-all active:scale-95">
+                <PhoneOff size={18} />
+              </button>
+            )}
           </div>
         </div>
 
