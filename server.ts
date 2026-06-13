@@ -79,6 +79,18 @@ interface Room {
 
 const rooms = new Map<string, Room>();
 let worker: Worker;
+let workerReady = false;
+
+// Waits for the mediasoup worker to be ready before proceeding.
+// Prevents "Failed to join room" errors when clients connect during startup.
+function waitForWorker(): Promise<void> {
+  return new Promise((resolve) => {
+    if (workerReady) { resolve(); return; }
+    const interval = setInterval(() => {
+      if (workerReady) { clearInterval(interval); resolve(); }
+    }, 100);
+  });
+}
 
 async function createMediasoupWorker(): Promise<Worker> {
   const w = await mediasoup.createWorker({
@@ -95,6 +107,7 @@ async function createMediasoupWorker(): Promise<Worker> {
 }
 
 async function getOrCreateRoom(sessionId: string): Promise<Room> {
+  await waitForWorker(); // guard against startup race
   let room = rooms.get(sessionId);
   if (room) return room;
   const router = await worker.createRouter({ mediaCodecs });
@@ -120,6 +133,8 @@ async function createWebRtcTransport(router: Router): Promise<WebRtcTransport> {
 
 async function main() {
   worker = await createMediasoupWorker();
+  workerReady = true;
+  console.log('✅ mediasoup worker ready — accepting connections');
 
   const httpServer = createServer();
   const io = new SocketIOServer(httpServer, {
@@ -165,9 +180,10 @@ async function main() {
           }));
 
         cb({ routerRtpCapabilities: room.router!.rtpCapabilities, existingPeers });
-      } catch (err) {
-        console.error('join-room error:', err);
-        cb({ error: 'Failed to join room' });
+      } catch (err: any) {
+        const msg = err?.message || String(err);
+        console.error('join-room error:', msg);
+        cb({ error: `Failed to join room: ${msg}` });
       }
     });
 

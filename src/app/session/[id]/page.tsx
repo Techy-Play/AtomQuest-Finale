@@ -260,7 +260,7 @@ export default function SessionPage() {
                 <><Separator orientation="vertical" className="h-3" /><span>{formatTime(callDuration)}</span></>
               )}
               <Separator orientation="vertical" className="h-3" />
-              <span>{peers.length + 1} participant{peers.length !== 0 ? 's' : '}</span>
+              <span>{peers.length + 1} participant{peers.length !== 0 ? 's' : ''}</span>
               {/* Dev-only: show which hostname/IP is in use */}
               {process.env.NODE_ENV !== 'production' && networkHost && (
                 <><Separator orientation="vertical" className="h-3" /><span className="font-mono text-[10px] opacity-60 hidden md:inline">{networkHost}</span></>
