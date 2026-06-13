@@ -28,18 +28,20 @@ export async function POST(req: NextRequest) {
       'image/jpeg', 'image/png', 'image/gif', 'image/webp',
       'application/pdf',
       'text/plain',
+      'video/webm', 'video/mp4', 'video/ogg',
     ];
-    if (!allowedTypes.includes(file.type)) {
+    const isVideo = file.type.startsWith('video/') || file.name.endsWith('.webm');
+    if (!allowedTypes.includes(file.type) && !isVideo) {
       return NextResponse.json(
-        { error: 'File type not supported. Only images and PDFs are allowed.' },
+        { error: 'File type not supported. Only images, PDFs, and videos are allowed.' },
         { status: 400 }
       );
     }
 
-    // Validate file size (10MB max)
-    const MAX_SIZE = 10 * 1024 * 1024;
+    // Validate file size (500MB for video, 10MB for others)
+    const MAX_SIZE = isVideo ? 500 * 1024 * 1024 : 10 * 1024 * 1024;
     if (file.size > MAX_SIZE) {
-      return NextResponse.json({ error: 'File too large. Max 10MB allowed.' }, { status: 400 });
+      return NextResponse.json({ error: `File too large. Max ${isVideo ? '500MB' : '10MB'} allowed.` }, { status: 400 });
     }
 
     // Convert file to buffer
@@ -47,14 +49,15 @@ export async function POST(req: NextRequest) {
     const buffer = Buffer.from(bytes);
 
     // Determine resource type
-    const resourceType = file.type === 'application/pdf' ? 'raw' : 'image';
+    const resourceType: 'video' | 'raw' | 'image' = isVideo ? 'video' : file.type === 'application/pdf' ? 'raw' : 'image';
+    const folder = isVideo ? 'connectdesk/recordings' : 'connectdesk/chat';
 
     // Upload to Cloudinary
     const result = await new Promise<any>((resolve, reject) => {
       cloudinary.uploader.upload_stream(
         {
           resource_type: resourceType,
-          folder: 'connectdesk/chat',
+          folder,
           public_id: `${user.userId}_${Date.now()}`,
           use_filename: true,
           unique_filename: true,

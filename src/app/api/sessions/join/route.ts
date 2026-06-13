@@ -1,36 +1,76 @@
 import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/prisma';
-import { getAuthUser } from '@/lib/auth';
+import { getAuthUser, hashPassword, signToken } from '@/lib/auth';
+import { cookies } from 'next/headers';
 
-// POST /api/sessions/join — Join a session via invite token
+// POST /api/sessions/join — Join via invite token (supports authenticated + guest)
 export async function POST(req: NextRequest) {
   try {
-    const user = await getAuthUser();
-    if (!user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
+    const body = await req.json();
+    const { inviteToken, name, email } = body;
 
-    const { inviteToken } = await req.json();
     if (!inviteToken) {
       return NextResponse.json({ error: 'Invite token is required' }, { status: 400 });
     }
 
     const session = await prisma.session.findUnique({
       where: { inviteToken },
-      include: {
-        agent: { select: { id: true, name: true, email: true } },
-      },
+      include: { agent: { select: { id: true, name: true, email: true } } },
     });
 
-    if (!session) {
-      return NextResponse.json({ error: 'Invalid invite token' }, { status: 404 });
-    }
-
+    if (!session) return NextResponse.json({ error: 'Invalid invite token' }, { status: 404 });
     if (session.status === 'ENDED') {
       return NextResponse.json({ error: 'This session has already ended' }, { status: 400 });
     }
 
-    // If user is the agent of this session, just return the session
+    // Attempt to get existing auth
+    let user = await getAuthUser();
+
+    // If not authenticated but name+email provided → auto-register as guest CUSTOMER
+    if (!user && name?.trim() && email?.trim()) {
+      const existing = await prisma.user.findUnique({ where: { email: email.trim().toLowerCase() } });
+
+      let dbUser;
+      if (existing) {
+        dbUser = existing;
+      } else {
+        // Auto-register guest customer with random password
+        const tempPass = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+        dbUser = await prisma.user.create({
+          data: {
+            name: name.trim(),
+            email: email.trim().toLowerCase(),
+            passwordHash: await hashPassword(tempPass),
+            role: 'CUSTOMER',
+          },
+        });
+      }
+
+      // Sign a JWT and set cookie
+      const token = signToken({
+        userId: dbUser.id,
+        email: dbUser.email,
+        name: dbUser.name,
+        role: dbUser.role as 'CUSTOMER',
+      });
+
+      const cookieStore = await cookies();
+      cookieStore.set('auth-token', token, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'lax',
+        maxAge: 60 * 60 * 24,
+        path: '/',
+      });
+
+      user = { userId: dbUser.id, email: dbUser.email, name: dbUser.name, role: dbUser.role as 'CUSTOMER' };
+    }
+
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized — please provide your name and email to join' }, { status: 401 });
+    }
+
+    // If user is the agent, just return the session
     if (session.agentId === user.userId) {
       return NextResponse.json({ session });
     }
@@ -49,7 +89,6 @@ export async function POST(req: NextRequest) {
       },
     });
 
-    // Log join event
     await prisma.sessionEvent.create({
       data: {
         sessionId: session.id,

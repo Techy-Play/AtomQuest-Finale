@@ -16,6 +16,7 @@ export default function HistoryPage() {
   const sessionId = params.id as string;
   const { user, loading } = useAuth();
   const [session, setSession] = useState<any>(null);
+  const [recordings, setRecordings] = useState<any[]>([]);
 
   useEffect(() => {
     if (!loading && !user) {
@@ -33,7 +34,17 @@ export default function HistoryPage() {
       }
     };
 
-    if (!loading && user) fetchSession();
+    const fetchRecordings = async () => {
+      try {
+        const res = await fetch(`/api/recordings/${sessionId}`);
+        const data = await res.json();
+        if (data.recordings) setRecordings(data.recordings);
+      } catch (err) {
+        // Not an agent — silently ignore
+      }
+    };
+
+    if (!loading && user) { fetchSession(); fetchRecordings(); }
   }, [loading, user, sessionId, router]);
 
   if (loading || !session) {
@@ -199,6 +210,65 @@ export default function HistoryPage() {
             </Card>
           </TabsContent>
         </Tabs>
+
+        {/* Recording Section — Agent Only */}
+        {(user?.role === 'AGENT' || user?.role === 'ADMIN') && (
+          <Card className="glass border-0">
+            <CardHeader>
+              <CardTitle className="text-base flex items-center gap-2">
+                <span className="w-7 h-7 rounded-lg bg-red-500/15 flex items-center justify-center">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-red-400">
+                    <circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3" fill="currentColor"/>
+                  </svg>
+                </span>
+                Session Recording
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {recordings.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No recording available for this session.</p>
+              ) : (
+                <div className="space-y-3">
+                  {recordings.map((rec: any) => (
+                    <div key={rec.id} className={`flex items-center justify-between p-3 rounded-xl border ${
+                      rec.status === 'READY' ? 'bg-emerald-500/10 border-emerald-500/20'
+                      : rec.status === 'RECORDING' ? 'bg-red-500/10 border-red-500/20'
+                      : rec.status === 'PROCESSING' ? 'bg-amber-500/10 border-amber-500/20'
+                      : 'bg-zinc-500/10 border-zinc-500/20'
+                    }`}>
+                      <div className="flex items-center gap-3">
+                        <Badge variant="secondary" className={`text-xs ${
+                          rec.status === 'READY' ? 'bg-emerald-500/20 text-emerald-400'
+                          : rec.status === 'RECORDING' ? 'bg-red-500/20 text-red-400'
+                          : rec.status === 'PROCESSING' ? 'bg-amber-500/20 text-amber-400'
+                          : 'bg-zinc-500/20 text-zinc-400'
+                        }`}>{rec.status}</Badge>
+                        <span className="text-xs text-muted-foreground">
+                          {new Date(rec.createdAt).toLocaleString()}
+                        </span>
+                        {rec.duration && <span className="text-xs text-muted-foreground">{Math.floor(rec.duration / 60)}m {rec.duration % 60}s</span>}
+                      </div>
+                      {rec.fileUrl && (
+                        <a
+                          href={rec.fileUrl}
+                          download
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center gap-1.5 bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/30 rounded-lg px-3 py-1.5 text-xs font-medium text-emerald-400 transition-colors"
+                        >
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+                          </svg>
+                          Download Recording
+                        </a>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        )}
       </main>
     </div>
   );

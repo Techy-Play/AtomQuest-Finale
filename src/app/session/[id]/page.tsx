@@ -12,6 +12,8 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { Paperclip, X } from 'lucide-react';
 
+type RecordingStatus = 'idle' | 'recording' | 'processing' | 'ready' | 'failed';
+
 export default function SessionPage() {
   const router = useRouter();
   const params = useParams();
@@ -31,6 +33,13 @@ export default function SessionPage() {
   const remoteVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
   const chatEndRef = useRef<HTMLDivElement>(null);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Recording state (agent only)
+  const [recordingStatus, setRecordingStatus] = useState<RecordingStatus>('idle');
+  const [recordingUrl, setRecordingUrl] = useState<string | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordingChunksRef = useRef<Blob[]>([]);
+  const recordingStartedRef = useRef(false);
 
   const {
     connect,
@@ -156,6 +165,85 @@ export default function SessionPage() {
     };
   }, [isConnected, callEnded]);
 
+  // Auto-start recording when both agent and customer are connected (agent side only)
+  const hasRemoteParticipant = remoteStreams.size > 0;
+  useEffect(() => {
+    const isAgent = user?.role === 'AGENT' || user?.role === 'ADMIN';
+    if (!isAgent || !isConnected || !hasRemoteParticipant || recordingStartedRef.current) return;
+
+    // Get the first remote stream (customer stream)
+    const [, remoteEntry] = Array.from(remoteStreams.entries())[0] || [];
+    if (!remoteEntry?.stream) return;
+
+    const customerStream = remoteEntry.stream;
+    if (!customerStream.getTracks().length) return;
+
+    try {
+      recordingStartedRef.current = true;
+      setRecordingStatus('recording');
+      recordingChunksRef.current = [];
+
+      const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')
+        ? 'video/webm;codecs=vp9,opus'
+        : MediaRecorder.isTypeSupported('video/webm')
+        ? 'video/webm'
+        : 'video/mp4';
+
+      const recorder = new MediaRecorder(customerStream, { mimeType });
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) recordingChunksRef.current.push(e.data);
+      };
+
+      recorder.onstop = async () => {
+        setRecordingStatus('processing');
+        try {
+          const blob = new Blob(recordingChunksRef.current, { type: mimeType });
+          const formData = new FormData();
+          formData.append('file', blob, `recording-${sessionId}.webm`);
+          const res = await fetch('/api/upload', { method: 'POST', body: formData });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error);
+
+          // Save to DB
+          await fetch(`/api/recordings/${sessionId}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ status: 'READY', fileUrl: data.url }),
+          });
+
+          setRecordingUrl(data.url);
+          setRecordingStatus('ready');
+        } catch (err) {
+          console.error('Recording upload failed:', err);
+          setRecordingStatus('failed');
+        }
+      };
+
+      recorder.start(5000); // Collect 5s chunks
+      mediaRecorderRef.current = recorder;
+
+      // Register in DB
+      fetch(`/api/recordings/${sessionId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'RECORDING' }),
+      }).catch(() => {});
+    } catch (err) {
+      console.error('Failed to start recording:', err);
+      setRecordingStatus('failed');
+      recordingStartedRef.current = false;
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isConnected, hasRemoteParticipant, user?.role]);
+
+  // Stop recording when call ends
+  const stopRecording = useCallback(() => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+      mediaRecorderRef.current = null;
+    }
+  }, []);
+
   // Auto-scroll chat
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -177,6 +265,7 @@ export default function SessionPage() {
 
   const handleEndCall = async () => {
     if (timerRef.current) clearInterval(timerRef.current);
+    stopRecording();
     await endSession();
     disconnect();
     setCallEnded(true);
@@ -184,6 +273,7 @@ export default function SessionPage() {
 
   const handleLeaveCall = () => {
     if (timerRef.current) clearInterval(timerRef.current);
+    stopRecording();
     disconnect();
     router.push(user?.role === 'AGENT' || user?.role === 'ADMIN' ? '/agent' : '/customer');
   };
@@ -446,6 +536,51 @@ export default function SessionPage() {
               )}
             </div>
           </div>
+          {/* Recording Status — AGENT ONLY */}
+          {(user?.role === 'AGENT' || user?.role === 'ADMIN') && recordingStatus !== 'idle' && (
+            <div className={`mx-4 mb-2 rounded-xl px-4 py-2.5 flex items-center gap-3 text-sm border ${
+              recordingStatus === 'recording' ? 'bg-red-500/10 border-red-500/30 text-red-400'
+              : recordingStatus === 'processing' ? 'bg-amber-500/10 border-amber-500/30 text-amber-400'
+              : recordingStatus === 'ready' ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
+              : 'bg-zinc-500/10 border-zinc-500/30 text-zinc-400'
+            }`}>
+              {recordingStatus === 'recording' && (
+                <>
+                  <span className="relative flex h-3 w-3 shrink-0">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-500 opacity-75" />
+                    <span className="relative inline-flex rounded-full h-3 w-3 bg-red-500" />
+                  </span>
+                  <span className="font-medium">Recording in Progress</span>
+                  <span className="text-xs text-red-400/70 ml-auto">Customer audio &amp; video only</span>
+                </>
+              )}
+              {recordingStatus === 'processing' && (
+                <>
+                  <span className="animate-spin rounded-full h-3 w-3 border-b-2 border-amber-400 shrink-0" />
+                  <span className="font-medium">Processing Recording...</span>
+                </>
+              )}
+              {recordingStatus === 'ready' && (
+                <>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="shrink-0 text-emerald-400"><polyline points="20 6 9 17 4 12"/></svg>
+                  <span className="font-medium">Recording Ready</span>
+                  {recordingUrl && (
+                    <a href={recordingUrl} download={`session-${sessionId}.webm`} target="_blank" rel="noopener noreferrer"
+                       className="ml-auto flex items-center gap-1.5 bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/30 rounded-lg px-3 py-1 text-xs font-medium transition-colors">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                      Download Recording
+                    </a>
+                  )}
+                </>
+              )}
+              {recordingStatus === 'failed' && (
+                <>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+                  <span className="font-medium">Recording Failed</span>
+                </>
+              )}
+            </div>
+          )}
 
           {/* Controls bar */}
           <div className="flex items-center justify-center gap-3 pt-4">
