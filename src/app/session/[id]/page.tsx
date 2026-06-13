@@ -621,7 +621,7 @@ export default function SessionPage() {
                 )}
                 <div ref={chatEndRef} />
               </div>
-            </ScrollArea>
+            </div>
 
             {/* Upload error */}
             {uploadError && (
