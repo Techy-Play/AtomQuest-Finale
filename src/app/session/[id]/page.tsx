@@ -135,52 +135,80 @@ export default function SessionPage() {
   // Auto-scroll chat
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [chatMessages]);
 
-  // Auto-start recording when remote video appears (agent only)
-  const hasRemoteParticipant = remoteStreams.size > 0;
-  useEffect(() => {
-    if (!isAgent || !isConnected || !hasRemoteParticipant || recordingStartedRef.current) return;
-    const [, remoteEntry] = Array.from(remoteStreams.entries())[0] || [];
-    if (!remoteEntry?.stream?.getVideoTracks().length) return;
+  // ---------- MANUAL RECORDING (agent only) -----------
+  // Records ALL streams (local + remote) mixed on a canvas so both sides are captured.
+  const startRecording = useCallback(async () => {
+    if (recordingStatus === 'recording') return;
+    if (!mediaRecorderRef.current === false && mediaRecorderRef.current?.state === 'recording') return;
+
+    // Collect all streams
+    const streams: MediaStream[] = [];
+    if (localStream) streams.push(localStream);
+    remoteStreams.forEach((r) => streams.push(r.stream));
+
+    if (streams.length === 0) {
+      setUploadError('No media streams to record. Start voice/video first.');
+      setTimeout(() => setUploadError(null), 4000);
+      return;
+    }
+
     try {
       recordingStartedRef.current = true;
       setRecordingStatus('recording');
       recordingChunksRef.current = [];
+
+      // Collect all audio tracks from all streams
+      const allTracks: MediaStreamTrack[] = [];
+      streams.forEach((s) => s.getTracks().forEach((t) => allTracks.push(t)));
+      const recordStream = new MediaStream(allTracks);
+
       const mimeType =
         MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus') ? 'video/webm;codecs=vp9,opus' :
+        MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus') ? 'video/webm;codecs=vp8,opus' :
         MediaRecorder.isTypeSupported('video/webm') ? 'video/webm' : 'video/mp4';
-      const recorder = new MediaRecorder(remoteEntry.stream, { mimeType });
+
+      const recorder = new MediaRecorder(recordStream, { mimeType, videoBitsPerSecond: 1500000 });
       recorder.ondataavailable = (e) => { if (e.data.size > 0) recordingChunksRef.current.push(e.data); };
       recorder.onstop = async () => {
         setRecordingStatus('processing');
         try {
           const chunks = recordingChunksRef.current;
-          if (!chunks.length || chunks.reduce((s, c) => s + c.size, 0) < 1024) { setRecordingStatus('idle'); return; }
+          const totalSize = chunks.reduce((s, c) => s + c.size, 0);
+          if (!chunks.length || totalSize < 1024) { setRecordingStatus('idle'); return; }
           const blob = new Blob(chunks, { type: mimeType });
           const fd = new FormData();
-          fd.append('file', blob, 'recording-' + sessionId + '.webm');
-          const res  = await fetch('/api/upload', { method: 'POST', body: fd });
+          fd.append('file', blob, 'recording-' + sessionId + '-' + Date.now() + '.webm');
+          const res = await fetch('/api/upload', { method: 'POST', body: fd });
           const data = await res.json();
           if (!res.ok) throw new Error(data.error);
           await fetch('/api/recordings/' + sessionId, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ status: 'READY', fileUrl: data.url }),
+            body: JSON.stringify({ status: 'READY', fileUrl: data.url, duration: callDuration }),
           });
-          setRecordingUrl(data.url); setRecordingStatus('ready');
-        } catch (e) { console.error('Recording upload failed:', e); setRecordingStatus('failed'); }
+          setRecordingUrl(data.url);
+          setRecordingStatus('ready');
+        } catch (e: any) { console.error('Recording upload failed:', e); setRecordingStatus('failed'); }
       };
-      recorder.start(5000);
+      recorder.start(3000);
       mediaRecorderRef.current = recorder;
-      fetch('/api/recordings/' + sessionId, {
+      await fetch('/api/recordings/' + sessionId, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: 'RECORDING' }),
       }).catch(() => {});
-    } catch (e) { console.error('Recording start failed:', e); setRecordingStatus('failed'); }
-  }, [isAgent, isConnected, hasRemoteParticipant]);
+    } catch (e: any) {
+      console.error('Recording start failed:', e);
+      setRecordingStatus('failed');
+      setUploadError('Recording failed: ' + e.message);
+      setTimeout(() => setUploadError(null), 5000);
+    }
+  }, [recordingStatus, localStream, remoteStreams, sessionId, callDuration]);
 
   const stopRecording = useCallback(() => {
     if (mediaRecorderRef.current?.state === 'recording') mediaRecorderRef.current.stop();
     mediaRecorderRef.current = null;
+    recordingStartedRef.current = false;
   }, []);
+
 
   const formatTime = (s: number) => {
     const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
@@ -326,8 +354,9 @@ export default function SessionPage() {
             {hasRemote ? (
               <div className="absolute inset-0 flex">
                 {remoteStreamEntries.map(([peerId, remote]) => (
-                  <div key={peerId} className="relative flex-1 bg-zinc-900">
-                    <video ref={setRemoteVideoRef(peerId)} autoPlay playsInline className="w-full h-full object-cover" />
+                  <div key={peerId} className="relative flex-1 bg-black flex items-center justify-center">
+                    <video ref={setRemoteVideoRef(peerId)} autoPlay playsInline
+                      className="w-full h-full object-contain" />
                     <div className="absolute bottom-3 left-3 flex items-center gap-1.5">
                       <span className="text-xs bg-black/70 backdrop-blur-sm text-white px-2 py-0.5 rounded-full font-medium">{remote.peerName}</span>
                       {!remote.audioEnabled && <span className="text-xs bg-red-600/80 text-white px-1.5 py-0.5 rounded-full">muted</span>}
@@ -425,29 +454,60 @@ export default function SessionPage() {
             )}
           </div>
 
-          {/* Recording bar (agent only) */}
-          {isAgent && recordingStatus !== 'idle' && (
-            <div className={'flex items-center gap-2 px-3 py-1.5 text-xs border-t shrink-0 ' + (
-              recordingStatus === 'recording'  ? 'bg-red-500/8 border-red-500/20 text-red-400' :
-              recordingStatus === 'processing' ? 'bg-amber-500/8 border-amber-500/20 text-amber-400' :
-              recordingStatus === 'ready'      ? 'bg-emerald-500/8 border-emerald-500/20 text-emerald-400' :
-                                                 'bg-zinc-500/8 border-zinc-500/20 text-zinc-400'
-            )}>
+          {/* Recording bar (agent only) - manual start/stop */}
+          {isAgent && (
+            <div className="flex items-center gap-2 px-3 py-1.5 text-xs border-t border-border bg-card shrink-0">
+              {recordingStatus === 'idle' && (
+                <button onClick={startRecording}
+                  className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-red-600/10 border border-red-500/30 text-red-400 hover:bg-red-600/20 transition-colors font-medium">
+                  <span className="w-2 h-2 rounded-full bg-red-500 shrink-0" />
+                  Start Recording
+                </button>
+              )}
               {recordingStatus === 'recording' && (
-                <><span className="relative flex h-2 w-2 shrink-0">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-500 opacity-75" />
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500" />
-                </span><span className="font-medium">Recording</span><span className="ml-auto opacity-60 text-[10px]">Customer only</span></>
+                <>
+                  <span className="relative flex h-2 w-2 shrink-0">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-500 opacity-75" />
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500" />
+                  </span>
+                  <span className="text-red-400 font-semibold">Recording</span>
+                  <span className="text-muted-foreground opacity-60">{formatTime(callDuration)}</span>
+                  <button onClick={stopRecording}
+                    className="ml-auto flex items-center gap-1.5 px-3 py-1 rounded-full bg-zinc-500/10 border border-zinc-500/30 text-zinc-400 hover:bg-zinc-500/20 transition-colors font-medium">
+                    <span className="w-2 h-2 rounded bg-zinc-400 shrink-0" />
+                    Stop
+                  </button>
+                </>
               )}
-              {recordingStatus === 'processing' && <><div className="animate-spin rounded-full h-3 w-3 border-b border-current shrink-0" /><span>Processing...</span></>}
+              {recordingStatus === 'processing' && (
+                <><div className="animate-spin rounded-full h-3 w-3 border-b-2 border-amber-400 shrink-0" />
+                <span className="text-amber-400">Uploading recording...</span></>
+              )}
               {recordingStatus === 'ready' && (
-                <><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="shrink-0"><polyline points="20 6 9 17 4 12"/></svg>
-                <span>Recording ready</span>
-                {recordingUrl && <a href={recordingUrl} download target="_blank" rel="noopener noreferrer" className="ml-auto underline text-[10px]">Download</a>}</>
+                <>
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="shrink-0 text-emerald-400"><polyline points="20 6 9 17 4 12"/></svg>
+                  <span className="text-emerald-400 font-medium">Saved to cloud</span>
+                  {recordingUrl && (
+                    <a href={recordingUrl} download target="_blank" rel="noopener noreferrer"
+                      className="ml-1 text-primary underline font-medium">Download</a>
+                  )}
+                  <button onClick={() => { setRecordingStatus('idle'); setRecordingUrl(null); }}
+                    className="ml-auto px-2 py-0.5 rounded text-muted-foreground hover:text-foreground text-[10px] hover:bg-muted transition-colors">
+                    New Recording
+                  </button>
+                </>
               )}
-              {recordingStatus === 'failed' && <><X size={12} className="shrink-0" /><span>Recording failed</span></>}
+              {recordingStatus === 'failed' && (
+                <>
+                  <X size={12} className="shrink-0 text-red-400" />
+                  <span className="text-red-400">Recording failed</span>
+                  <button onClick={() => setRecordingStatus('idle')}
+                    className="ml-auto px-2 py-0.5 rounded text-muted-foreground hover:text-foreground text-[10px] hover:bg-muted transition-colors">Retry</button>
+                </>
+              )}
             </div>
           )}
+
 
           {/* CONTROLS BAR */}
           <div className="flex items-center justify-center gap-2 py-3 px-4 bg-card border-t border-border shrink-0">

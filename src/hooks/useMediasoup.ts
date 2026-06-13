@@ -160,19 +160,25 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
 
   const consumeProducer = useCallback(async (producerId: string, peerSocketId: string, peerName?: string, peerRole?: string) => {
     const device = deviceRef.current;
-    if (!device) return;
+    if (!device) { console.warn('[ConnectDesk] consumeProducer: device not ready'); return; }
     let transport = recvTransportRef.current;
-    if (!transport || transport.closed) transport = await createRecvTransport();
+    if (!transport || transport.closed) {
+      console.log('[ConnectDesk] consumeProducer: creating recv transport');
+      transport = await createRecvTransport();
+    }
     try {
+      console.log('[ConnectDesk] consumeProducer: consuming producerId=', producerId, 'from peer=', peerSocketId);
       const cd = await emitAsync('consume', {
         sessionId: sessionIdRef.current, transportId: transport.id,
         producerId, rtpCapabilities: device.rtpCapabilities,
       });
+      console.log('[ConnectDesk] consumeProducer: got consumer data kind=', cd.kind, 'consumerId=', cd.id);
       const consumer = await transport.consume({
         id: cd.id, producerId: cd.producerId, kind: cd.kind, rtpParameters: cd.rtpParameters,
       });
       consumersRef.current.set(consumer.id, consumer);
       await emitAsync('resume-consumer', { sessionId: sessionIdRef.current, consumerId: consumer.id });
+      console.log('[ConnectDesk] consumeProducer: resumed consumer', consumer.id);
       setRemoteStreams((prev) => {
         const m = new Map(prev);
         const ex = m.get(peerSocketId);
@@ -197,7 +203,9 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
   const registerSocketEvents = useCallback((socket: Socket) => {
     socket.on('peer-joined', (peer: PeerInfo) => {
       console.log('[ConnectDesk] Peer joined:', peer.name, peer.role);
-      setPeers((p) => [...p.filter((x) => x.socketId !== peer.socketId), peer]);
+      // Update ref synchronously so event handlers can access current peers immediately
+      peersRef.current = [...peersRef.current.filter((x) => x.socketId !== peer.socketId), peer];
+      setPeers(peersRef.current);
     });
     socket.on('peer-left', ({ socketId }: { socketId: string }) => {
       setPeers((p) => p.filter((x) => x.socketId !== socketId));
@@ -303,6 +311,9 @@ export function useMediasoup({ sessionId, userId, userName, userRole, onSessionE
       await createRecvTransport();
 
       const existingPeers: PeerInfo[] = joinData.existingPeers || [];
+      // Update ref SYNCHRONOUSLY before registering socket events so that
+      // `new-producer` handler immediately sees the correct peer list.
+      peersRef.current = existingPeers;
       setPeers(existingPeers);
       for (const peer of existingPeers) {
         if (peer.producers && peer.producers.length > 0) {
